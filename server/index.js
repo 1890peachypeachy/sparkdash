@@ -664,10 +664,11 @@ app.delete("/api/sparks/:id/llm/bench/:benchId", (req, res) => {
 });
 
 /**
- * LLM Prompt Showcase — concurrent streaming demos (ephemeral).
+ * LLM Prompt Showcase — concurrent streaming demos.
  *
- * POST body: { port, modelId?, maxTokens?, prompts: string[] }
- * Returns 202 { sessionId }; poll GET for deltas; DELETE to cancel.
+ * POST body: { port, modelId?, maxTokens?, temperature?, thinking?, prompts: string[] }
+ * Returns 202 { sessionId }; poll GET for deltas; DELETE :sessionId to cancel.
+ * Finished runs are archived; GET collection lists history; DELETE collection clears it.
  */
 app.post("/api/sparks/:id/llm/showcase", (req, res) => {
   const spark = registry.getSpark(req.params.id);
@@ -714,6 +715,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
       port,
       modelId,
       maxTokens: req.body?.maxTokens,
+      temperature: req.body?.temperature,
       thinking: req.body?.thinking,
       prompts: req.body?.prompts,
     });
@@ -722,6 +724,40 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
     const status = err.status || 500;
     res.status(status).json({ error: err.message });
   }
+});
+
+/** Active session + finished history summaries (no stream bodies). */
+app.get("/api/sparks/:id/llm/showcase", (req, res) => {
+  const spark = registry.getSpark(req.params.id);
+  if (!spark) return res.status(404).json({ error: "Spark not found" });
+  if (spark.workerNode) {
+    return res.status(403).json({ error: "Worker nodes do not expose a local LLM API" });
+  }
+  if (spark.llmMonitoring === false) {
+    return res.status(403).json({ error: "LLM monitoring is disabled for this Spark" });
+  }
+
+  res.json({
+    active: showcaseManager.getActive(spark.id),
+    history: showcaseManager.getHistory(spark.id),
+  });
+});
+
+/** Clear finished showcase history for a Spark. Does not cancel a running session. */
+app.delete("/api/sparks/:id/llm/showcase", (req, res) => {
+  const spark = registry.getSpark(req.params.id);
+  if (!spark) return res.status(404).json({ error: "Spark not found" });
+  if (spark.workerNode) {
+    return res.status(403).json({ error: "Worker nodes do not expose a local LLM API" });
+  }
+  if (spark.llmMonitoring === false) {
+    return res.status(403).json({ error: "LLM monitoring is disabled for this Spark" });
+  }
+  if (showcaseManager.getActive(spark.id)) {
+    return res.status(409).json({ error: "Cannot clear history while a showcase is running" });
+  }
+  showcaseManager.clearHistory(spark.id);
+  res.json({ success: true });
 });
 
 app.get("/api/sparks/:id/llm/showcase/:sessionId", (req, res) => {

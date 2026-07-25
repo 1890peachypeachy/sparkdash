@@ -7,6 +7,18 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.3.3] — 2026-07-25
+
+### Added
+- **Prompt Showcase history** — finished runs are archived to disk (`config/showcase-history.json`, last 20 per Spark); History panel to browse, open a past run (read-only terminals), reuse prompts/settings, or clear history
+- **Showcase sampling temperature** — **Temp** control (0–2, default 0.7) before Run; validated server-side and applied to chat completions
+- **Open Showcase when LLM is offline** — Showcase button remains available on the LLM panel when no model is loaded on the selected port (view history / stage a run)
+
+### Changed
+- **Peak tok/s** — per-terminal peak rate, always-visible aggregate and server peak in the metrics strip; peak included in copy-out
+
+---
+
 ## [1.3.1] — 2026-07-24
 
 ### Fixed

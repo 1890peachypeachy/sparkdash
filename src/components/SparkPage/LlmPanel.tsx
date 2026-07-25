@@ -283,9 +283,30 @@ export function LlmPanel({ llm, sparkId, llmPort, onRemovePort, className }: Llm
           </div>
         </div>
       ) : !available ? (
-        <div className="flex items-center gap-2 py-1">
-          <span className="h-1.5 w-1.5 rounded-full bg-muted" />
-          <p className="text-xs text-muted">No model loaded on :{llmPort}</p>
+        <div className="space-y-3">
+          <div className="flex items-center gap-2 py-1">
+            <span className="h-1.5 w-1.5 rounded-full bg-muted" />
+            <p className="text-xs text-muted">No model loaded on :{llmPort}</p>
+          </div>
+          <div className="border-t border-border pt-3 space-y-2">
+            <button
+              type="button"
+              onClick={() => {
+                const params = new URLSearchParams();
+                if (llmPort) params.set("port", String(llmPort));
+                const q = params.toString() ? `?${params.toString()}` : "";
+                window.open(
+                  `/showcase/${encodeURIComponent(sparkId)}${q}`,
+                  "_blank",
+                  "noopener,noreferrer"
+                );
+              }}
+              className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs font-medium text-text transition-colors hover:border-accent hover:bg-accent-soft"
+              title="Open prompt showcase (works offline to view history or prepare a run)"
+            >
+              Showcase
+            </button>
+          </div>
         </div>
       ) : (
         <div className="space-y-3">

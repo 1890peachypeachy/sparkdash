@@ -405,6 +405,8 @@ export interface ShowcaseStartRequest {
   port: number;
   modelId?: string | null;
   maxTokens?: number;
+  /** Sampling temperature (0–2). Defaults to 0.7 on the server. */
+  temperature?: number;
   /** When true, enable model thinking/reasoning flags (UI defaults to off). */
   thinking?: boolean;
   prompts: string[];
@@ -426,6 +428,7 @@ export interface ShowcaseStreamState {
   ttftMs: number | null;
   decodeTps: number;
   liveTokPerSec: number;
+  peakTokPerSec?: number;
   model: string | null;
   error: string | null;
 }
@@ -437,13 +440,49 @@ export interface ShowcaseSessionState {
   rev: number;
   port: number;
   modelId?: string | null;
+  maxTokens?: number | null;
+  temperature?: number;
+  thinking?: boolean;
   startedAt?: number;
+  completedAt?: number | null;
   /** Median server generation tok/s from /metrics during the run (null if unavailable). */
   serverGenerationTps?: number | null;
   serverGenerationTpsMax?: number | null;
   serverGenerationSamples?: number;
+  totalTokens?: number;
+  meanDecodeTps?: number;
+  peakStreamTps?: number;
+  streamCount?: number;
   streams: ShowcaseStreamState[];
   error?: string | null;
+  /** True when loaded from disk history (not a live poll session). */
+  fromHistory?: boolean;
+}
+
+/** List-row for finished showcase runs (no stream bodies). */
+export interface ShowcaseHistorySummary {
+  sessionId: string;
+  sparkId: string;
+  status: "completed" | "cancelled" | "error" | string;
+  port: number;
+  modelId?: string | null;
+  maxTokens?: number | null;
+  temperature?: number;
+  thinking?: boolean;
+  startedAt?: number | null;
+  completedAt?: number | null;
+  serverGenerationTps?: number | null;
+  serverGenerationTpsMax?: number | null;
+  totalTokens: number;
+  meanDecodeTps: number;
+  peakStreamTps: number;
+  streamCount: number;
+  error?: string | null;
+}
+
+export interface ShowcaseListResponse {
+  active: { sessionId: string; status: string } | null;
+  history: ShowcaseHistorySummary[];
 }
 
 export interface ShowcaseStartResponse {

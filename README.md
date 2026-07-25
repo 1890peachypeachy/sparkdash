@@ -46,10 +46,11 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
-### Version 1.3.0 — major feature release
-- **LLM Prompt Showcase** — full-page multi-terminal streaming demo (up to 32 concurrent prompts) from the LLM panel
-- Aggregate server tok/s during runs, copy one/all terminals, collapsible reasoning, thinking-flag adapter
-- Shared streaming path for Showcase + DecodeBench; mutual exclusion between the two
+### Version 1.3.3 — Prompt Showcase polish
+- **History** — past showcase runs saved on disk; open a run later, reuse its prompts/settings, or clear history
+- **Temp** — set sampling temperature (0–2) before Run
+- **Peak tok/s** — live peak per terminal plus aggregate/server peak in the metrics strip
+- **Offline entry** — open Showcase from the LLM panel even when no model is listening on the port
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
