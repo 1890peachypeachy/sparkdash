@@ -772,11 +772,6 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
               <span className="showcase-config__meta">
                 <span className="showcase-config__meta-label">Prompt Showcase</span>
               </span>
-              {modelId ? (
-                <span className="showcase-config__model" title={modelId}>
-                  {modelId}
-                </span>
-              ) : null}
             </div>
           </div>
           <div className="showcase-config-peek__actions">
@@ -829,11 +824,6 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
               <span className="showcase-config__meta">
                 <span className="showcase-config__meta-label">Prompt Showcase</span>
               </span>
-              {modelId ? (
-                <span className="showcase-config__model" title={modelId}>
-                  {modelId}
-                </span>
-              ) : null}
             </div>
           </div>
           <div className="showcase-config__controls">
@@ -1098,6 +1088,13 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
         )}
       </div>
       )}
+
+      {modelId ? (
+        <header className="showcase-model-header" title={modelId}>
+          <span className="showcase-model-header__label">Model</span>
+          <h1 className="showcase-model-header__name">{modelId}</h1>
+        </header>
+      ) : null}
 
       {showMetricsStrip && (
         <div className="showcase-metrics" aria-live="polite">

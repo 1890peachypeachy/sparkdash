@@ -7,6 +7,14 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.3.4] — 2026-07-27
+
+### Changed
+- **Prompt Showcase model header** — model id shown as a prominent centered banner above the metrics strip (removed from the compact title stack under the spark name)
+- **Prompt Showcase density** — tighter config fields/inputs/buttons and ~1px smaller base type for more room for the terminal grid
+
+---
+
 ## [1.3.3] — 2026-07-25
 
 ### Added

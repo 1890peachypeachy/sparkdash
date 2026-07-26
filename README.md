@@ -46,11 +46,9 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
-### Version 1.3.3 — Prompt Showcase polish
-- **History** — past showcase runs saved on disk; open a run later, reuse its prompts/settings, or clear history
-- **Temp** — set sampling temperature (0–2) before Run
-- **Peak tok/s** — live peak per terminal plus aggregate/server peak in the metrics strip
-- **Offline entry** — open Showcase from the LLM panel even when no model is listening on the port
+### Version 1.3.4 — Prompt Showcase model header & density
+- **Model header** — model id as a large centered banner above the metrics strip (not tucked under the spark name)
+- **Tighter chrome** — denser config fields, inputs, and buttons; page type ~1px smaller for more terminal space
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
