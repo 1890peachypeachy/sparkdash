@@ -1453,9 +1453,7 @@ input[type="checkbox"] {
   text-align: right;
   min-width: 0;
 }
-.bench-result-row__metric--decode .bench-result-row__value {
-  color: var(--color-text-strong);
-}
+
 .bench-result-row__label {
   font-size: 0.625rem;
   font-weight: 600;
@@ -1465,7 +1463,7 @@ input[type="checkbox"] {
 }
 @media (min-width: 480px) {
   .bench-results--table .bench-result-row__label {
-    /* Column headers already name Server / Decode on wider screens */
+    /* Column headers already name Aggregate / /stream on wider screens */
     position: absolute;
     width: 1px;
     height: 1px;

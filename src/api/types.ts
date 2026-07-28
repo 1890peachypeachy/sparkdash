@@ -347,15 +347,6 @@ export interface DecodeBenchLevelResult {
   medianTtftMs: number;
   /** Client: total post-first-token tokens / concurrent decode window */
   aggregateDecodeTps: number;
-  /**
-   * Median server-side generation tok/s from live-style /metrics polls during the wave.
-   * Null when the backend does not expose counters.
-   */
-  serverGenerationTps: number | null;
-  /** Peak sample of server generation tok/s during the wave */
-  serverGenerationTpsMax?: number | null;
-  /** Number of positive rate samples collected from the engine */
-  serverGenerationSamples?: number;
   totalDecodeTokens: number;
   totalCompletionTokens: number;
   durationMs: number;

@@ -14,7 +14,6 @@ import {
   applyThinkingFlags,
   mean,
   median,
-  pollServerGenerationRates,
   round2,
   runStreamingRequest,
   sleep,
@@ -159,7 +158,7 @@ function emptyWaveResult(concurrency, waveMs, results, modelId, error, prompts =
      * Server-side generation tok/s (same basis as live Generation tok/s panel).
      * Null when the backend does not expose counters.
      */
-    serverGenerationTps: null,
+
     totalDecodeTokens: 0,
     totalCompletionTokens: 0,
     durationMs: round2(waveMs),
@@ -231,17 +230,14 @@ async function runConcurrencyWave({
   const wallStart = performance.now();
 
   // Poll /metrics like the live panel while streams run (steady-state gen tok/s)
-  const ratePollAbort = new AbortController();
   const hwPollAbort = new AbortController();
   const onParentForPoll = () => {
-    ratePollAbort.abort();
     hwPollAbort.abort();
   };
   if (abortSignal) {
     if (abortSignal.aborted) onParentForPoll();
     else abortSignal.addEventListener("abort", onParentForPoll, { once: true });
   }
-  const ratePollPromise = pollServerGenerationRates(baseUrl, ratePollAbort.signal, 400);
   const hwPollPromise = debug
     ? pollHardwareSamples(sampleHardware, hwPollAbort.signal, HARDWARE_SAMPLE_MS)
     : Promise.resolve([]);
@@ -294,14 +290,12 @@ async function runConcurrencyWave({
   } finally {
     clearTimeout(waveTimer);
     // Stop metrics / hardware polling as soon as streams finish
-    ratePollAbort.abort();
     hwPollAbort.abort();
     if (abortSignal) abortSignal.removeEventListener("abort", onParentForPoll);
   }
 
   const wallEnd = performance.now();
   const waveMs = wallEnd - wallStart;
-  const rateStats = await ratePollPromise;
   const hardwareSamples = await hwPollPromise;
 
   if (waveTimedOut && results.every((r) => r.error)) {
@@ -336,13 +330,6 @@ async function runConcurrencyWave({
     }
   }
 
-  // Primary server number: median of live-style poll samples (matches dashboard)
-  let serverGenerationTps = rateStats.median;
-  // Fallback: total completion tokens / client decode window if no metrics endpoint
-  if (serverGenerationTps == null && aggregateDecodeTps > 0) {
-    serverGenerationTps = round2(aggregateDecodeTps);
-  }
-
   const model = results.find((r) => r.model)?.model || modelId || null;
 
   /** @type {Record<string, unknown>} */
@@ -357,9 +344,7 @@ async function runConcurrencyWave({
     meanTtftMs: round2(mean(ttftList)),
     medianTtftMs: round2(median(ttftList)),
     aggregateDecodeTps: round2(aggregateDecodeTps),
-    serverGenerationTps,
-    serverGenerationTpsMax: rateStats.max,
-    serverGenerationSamples: rateStats.samples,
+
     totalDecodeTokens,
     totalCompletionTokens,
     durationMs: round2(waveMs),

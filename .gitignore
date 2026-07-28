@@ -7,6 +7,8 @@ config/.secrets-key
 config/bench-history.json
 config/showcase-history.json
 config/gpu-memory.json
+config/gpu-memory.json.*
+config/bench-exports/
 *.log
 .DS_Store
 docs/
