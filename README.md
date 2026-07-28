@@ -46,6 +46,11 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
+### Version 1.4.0 — Free storage, cleaner disk rows
+- **Free space** — each disk shows available GB right next to used/total; I/O speeds get their own row below
+
+Full history: [CHANGELOG.md](./CHANGELOG.md)
+
 ### Version 1.3.9 — Showcase prompt types, full-token fills & live tok/s
 - **Prompt types** — Text / Structural / Mixed catalogs for apples-to-apples tok/s scenarios
 - **Fill max tokens** — showcase streams force full-length generations (`min_tokens` + `ignore_eos`)
