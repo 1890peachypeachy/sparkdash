@@ -7,6 +7,13 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.4.0] — 2026-07-29
+
+### Added
+- **Free storage** — each disk row in the Storage panel now shows available free space (GB) right-aligned next to used/total, and I/O speeds moved to their own row below
+
+---
+
 ## [1.3.9] — 2026-07-28
 
 ### Added

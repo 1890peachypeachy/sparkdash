@@ -222,14 +222,20 @@ export function StoragePanel({
                       <span className="font-tabular text-muted">
                         {formatGb(disk.used)} / {formatGb(disk.total)}
                       </span>
-                      {disk.readSpeed > 0 || disk.writeSpeed > 0 ? (
+                      <span className="font-tabular text-muted">
+                        {formatGb(disk.available)} free
+                      </span>
+                    </div>
+                    {disk.readSpeed > 0 || disk.writeSpeed > 0 ? (
+                      <div className="flex items-center justify-end gap-3 text-[10px]">
                         <span className="font-tabular text-muted">
                           <span className="text-accent">↑</span> {formatBytesPerSec(disk.writeSpeed)}
-                          <span className="mx-1 text-border">·</span>
+                        </span>
+                        <span className="font-tabular text-muted">
                           <span className="text-accent">↓</span> {formatBytesPerSec(disk.readSpeed)}
                         </span>
-                      ) : null}
-                    </div>
+                      </div>
+                    ) : null}
                   </div>
                 );
               })}
