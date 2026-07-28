@@ -10,13 +10,15 @@ Format: version sections are listed newest first.
 ## [1.3.9] — 2026-07-28
 
 ### Added
-- **Prompt Showcase prompt types** — **Text** / **Structural** / **Mixed** catalogs (mixed interleaves half/half) so tok/s can be compared by workload shape
-- **Endpoint security posture badge** — green/amber/red hint from unauthenticated probe reachability + configured target host scope ([#17](https://github.com/MiaAI-Lab/sparkDash/issues/17) / [#19](https://github.com/MiaAI-Lab/sparkDash/pull/19))
-- **Configurable `BIND_HOST`** — HTTP/WebSocket listen address (default `0.0.0.0`) ([#18](https://github.com/MiaAI-Lab/sparkDash/pull/18))
+- **Prompt Showcase prompt types** — **Text** / **Structural** / **Mixed** catalogs (mixed interleaves structural and text) so tok/s can be compared by workload shape; type is stored on runs and shown in History
+- **Endpoint security posture badge** — per-LLM-panel green / amber / red hint from unauthenticated `/v1/models` (or `/slots`) reachability plus configured probe-host scope (loopback / LAN / public); tooltip does not claim process bind address ([#17](https://github.com/MiaAI-Lab/sparkDash/issues/17), [#19](https://github.com/MiaAI-Lab/sparkDash/pull/19))
+- **Configurable `BIND_HOST`** — HTTP and WebSocket listen address via env (default `0.0.0.0`); documented for Docker bridge vs host-network / reverse-proxy setups ([#18](https://github.com/MiaAI-Lab/sparkDash/pull/18))
 
 ### Changed
-- **Showcase fills max tokens** — requests use `min_tokens` / `ignore_eos` / empty `stop`, plus a hard “do not stop early” prompt suffix; longer per-stream timeout for full fills
-- **Live showcase tok/s** — estimate tokens from streamed text (~4 chars/token) instead of counting SSE deltas, so live/peak rates match final decode tok/s
+- **Showcase fills max tokens** — each stream requests a full-length generation (`min_tokens` = `max_tokens`, `ignore_eos`, empty `stop`) plus a hard “do not stop early” prompt suffix; retries once without those fields if the backend returns HTTP 400; per-stream timeout raised to 360s for long fills
+
+### Fixed
+- **Live showcase tok/s under-count** — live/peak rates counted SSE deltas (often multi-token chunks on vLLM), so terminals showed ~6 tok/s while streaming then jumped to the real ~25 at completion; now estimate from streamed text (~4 chars/token) using the same first→last token window as final decode tok/s
 
 ---
 

@@ -50,6 +50,8 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 - **Prompt types** — Text / Structural / Mixed catalogs for apples-to-apples tok/s scenarios
 - **Fill max tokens** — showcase streams force full-length generations (`min_tokens` + `ignore_eos`)
 - **Accurate live tok/s** — estimate from text while streaming (SSE chunks were under-counting)
+- **Security posture badge** — open / LAN / public exposure hint on each LLM panel ([#17](https://github.com/MiaAI-Lab/sparkDash/issues/17))
+- **`BIND_HOST`** — configurable HTTP/WebSocket listen address ([#18](https://github.com/MiaAI-Lab/sparkDash/pull/18))
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
