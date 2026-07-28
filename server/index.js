@@ -24,6 +24,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 
+const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
 
@@ -1091,9 +1092,9 @@ function restartBroadcast() {
 loadSettings();
 startBroadcast();
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`[sparkDash] server listening on http://0.0.0.0:${PORT}`);
-  console.log(`[sparkDash] WebSocket endpoint ws://0.0.0.0:${PORT}/ws`);
+server.listen(PORT, BIND_HOST, () => {
+  console.log(`[sparkDash] server listening on http://${BIND_HOST}:${PORT}`);
+  console.log(`[sparkDash] WebSocket endpoint ws://${BIND_HOST}:${PORT}/ws`);
   startAllMonitors();
 });
 

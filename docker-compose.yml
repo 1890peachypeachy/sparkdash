@@ -28,6 +28,7 @@ services:
       # Config + encrypted secrets (passwords survive restarts)
       - ./config:/app/config
     environment:
+      - BIND_HOST=0.0.0.0
       - PORT=5555
       - LLM_PORT=8888
       - NODE_ENV=production
