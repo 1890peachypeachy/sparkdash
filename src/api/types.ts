@@ -419,6 +419,8 @@ export interface StartDecodeBenchRequest {
 }
 
 // ─── LLM Prompt Showcase ─────────────────────────────────
+export type ShowcasePromptType = "structural" | "text" | "mixed";
+
 export interface ShowcaseStartRequest {
   port: number;
   modelId?: string | null;
@@ -427,6 +429,8 @@ export interface ShowcaseStartRequest {
   temperature?: number;
   /** When true, enable model thinking/reasoning flags (UI defaults to off). */
   thinking?: boolean;
+  /** Catalog mode used to seed prompts (structural / text / mixed). */
+  promptType?: ShowcasePromptType | null;
   prompts: string[];
 }
 
@@ -461,6 +465,7 @@ export interface ShowcaseSessionState {
   maxTokens?: number | null;
   temperature?: number;
   thinking?: boolean;
+  promptType?: ShowcasePromptType | null;
   startedAt?: number;
   completedAt?: number | null;
   /** Median server generation tok/s from /metrics during the run (null if unavailable). */
@@ -487,6 +492,7 @@ export interface ShowcaseHistorySummary {
   maxTokens?: number | null;
   temperature?: number;
   thinking?: boolean;
+  promptType?: ShowcasePromptType | null;
   startedAt?: number | null;
   completedAt?: number | null;
   serverGenerationTps?: number | null;

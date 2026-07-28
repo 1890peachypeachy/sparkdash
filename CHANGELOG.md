@@ -7,6 +7,19 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.3.9] — 2026-07-28
+
+### Added
+- **Prompt Showcase prompt types** — **Text** / **Structural** / **Mixed** catalogs (mixed interleaves half/half) so tok/s can be compared by workload shape
+- **Endpoint security posture badge** — green/amber/red hint from unauthenticated probe reachability + configured target host scope ([#17](https://github.com/MiaAI-Lab/sparkDash/issues/17) / [#19](https://github.com/MiaAI-Lab/sparkDash/pull/19))
+- **Configurable `BIND_HOST`** — HTTP/WebSocket listen address (default `0.0.0.0`) ([#18](https://github.com/MiaAI-Lab/sparkDash/pull/18))
+
+### Changed
+- **Showcase fills max tokens** — requests use `min_tokens` / `ignore_eos` / empty `stop`, plus a hard “do not stop early” prompt suffix; longer per-stream timeout for full fills
+- **Live showcase tok/s** — estimate tokens from streamed text (~4 chars/token) instead of counting SSE deltas, so live/peak rates match final decode tok/s
+
+---
+
 ## [1.3.4] — 2026-07-27
 
 ### Changed

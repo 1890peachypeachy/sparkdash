@@ -16,44 +16,15 @@ import type {
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { BoltIcon } from "../ui/icons";
 import { TerminalCard } from "./TerminalCard";
-
-const DEFAULT_PROMPTS = [
-  "Explain NVIDIA GB10 unified memory in plain language. Write a short essay of a few paragraphs.",
-  "Emit only a JSON array of fake GPU metrics rows. Each object needs host, gpuIndex, utilPct, tempC, powerW, memUsedMb. Invent at least 12 rows. No markdown.",
-  "Emit only an HTML FAQ about CUDA and vLLM. Use <h2> and <p> for several Q&A pairs. No markdown fences.",
-  "Write a short sci-fi scene set in a server room at 3 a.m. Keep it vivid and under 400 words.",
-  "List 20 shell one-liners useful for NVIDIA Sparks / DGX. Commands only, one per line, no commentary.",
-  "Emit a Markdown comparison table: llama.cpp vs vLLM vs SGLang. Columns: feature, llama.cpp, vLLM, SGLang. Fill many rows.",
-  "Stream a fake syslog of cluster events (timestamps, INFO/WARN/ERROR, services). Keep lines coming until the length limit.",
-  "Write a sequence of haiku about tokens, GPUs, and heat. Separate each haiku with a blank line. Write at least eight.",
-  "Write only valid YAML for a multi-service docker-compose stack with redis, postgres, api, and worker. Expand with env and volumes.",
-  "Emit a CSV of invent datacenter PUE readings: date,site,pue,itKw,facilityKw. At least 40 rows. CSV only, no commentary.",
-  "Write a pirate-captain monologue explaining KV-cache pressure to the crew. Keep it under 350 words.",
-  "Generate a GraphQL schema as SDL only: types Query, Mutation, User, Job, Metric. Add many fields and enums.",
-  "List 25 git aliases useful for ML infra repos. Format: alias = command. No explanations.",
-  "Write a fake RFC-style abstract and intro for \"Token Streaming over QUIC\". Formal tone, continue until the length limit.",
-  "Emit only a Python dataclass module for SparkHost, GpuSlice, and LlmEndpoint with typed fields and docstrings.",
-  "Write a nursery-rhyme style poem about thermal throttling. Several stanzas.",
-  "Generate an OpenAPI 3 paths snippet as JSON for /v1/models and /v1/chat/completions. Expand schemas heavily.",
-  "Emit a Markdown cheatsheet: nvidia-smi flags vs what they show. Dense table, many rows.",
-  "Write dialogue between two ops engineers debugging a stuck vLLM queue. Natural, continue for many turns.",
-  "Generate a long TOML config for a fictional inference gateway: listeners, routes, retries, budgets.",
-  "Emit only SQL: CREATE TABLE + many INSERT statements for gpu_jobs(id, host, model, tokens, ms).",
-  "Write a travel-brochure parody for visiting a liquid-cooled GPU rack. Flowery marketing tone.",
-  "Generate ASCII art labels (text only) for WARN, Crit, OK, and Idle banners. Several variants each.",
-  "Emit a bullet-only runbook: cold-start a 4-GPU SGLang node. Commands and checks, no fluff.",
-  "Write a courtroom cross-examination where the witness is a tokenizer. Continue with many Q&A exchanges.",
-  "Generate a Mermaid sequenceDiagram as fenced code for client → proxy → vLLM → GPU. Expand with retries.",
-  "Emit a long alphabetized glossary of ML-systems jargon (KV cache, TTFT, ITL, MTP, …) as Markdown definition list.",
-  "Write a weather report for a cluster: temperature fronts across racks, token-storm warnings. Radio-host style.",
-  "Generate only a Rust-flavored pseudocode module for a lock-free token ring buffer. Keep expanding functions.",
-  "Emit a fake Prometheus scrape dump (text exposition format) for showcase_tokens_total and showcase_ttft_seconds.",
-  "Write packaging copy for a fictional energy drink called Prefill Punch aimed at LLM operators.",
-  "Generate a multi-chapter outline then expand chapter 1 into prose: \"The Day the Slots Went to Zero.\"",
-];
+import {
+  PROMPT_TYPES,
+  pickShowcasePrompts,
+  type ShowcasePromptType,
+} from "./showcasePrompts";
 
 const POLL_MS = 300;
 const DEFAULT_MAX_TOKENS = 512;
+const DEFAULT_PROMPT_TYPE: ShowcasePromptType = "mixed";
 const DEFAULT_TEMPERATURE = 0.7;
 const MIN_TEMPERATURE = 0;
 const MAX_TEMPERATURE = 2;
@@ -214,7 +185,10 @@ async function copyText(text: string): Promise<boolean> {
 export function ShowcasePage({ sparkId }: ShowcasePageProps) {
   const [spark, setSpark] = useState<SparkConfig | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
-  const [prompts, setPrompts] = useState<string[]>(() => DEFAULT_PROMPTS.slice(0, 4));
+  const [promptType, setPromptType] = useState<ShowcasePromptType>(DEFAULT_PROMPT_TYPE);
+  const [prompts, setPrompts] = useState<string[]>(() =>
+    pickShowcasePrompts(DEFAULT_PROMPT_TYPE, 4)
+  );
   const [terminalCount, setTerminalCount] = useState(4);
   const [port, setPort] = useState(8888);
   const [modelId, setModelId] = useState<string | null>(() => readModelQuery());
@@ -379,22 +353,34 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
     };
   }, [sparkId, spark, port]);
 
-  useEffect(() => {
-    setPrompts((prev) => {
-      const next = DEFAULT_PROMPTS.slice(0, terminalCount);
-      return next.map((d, i) => (prev[i] != null && prev[i] !== "" ? prev[i] : d));
-    });
-  }, [terminalCount]);
-
   const setTerminalCountSafe = useCallback(
     (n: number) => {
       setTerminalCount(n);
-      // Rebuild the grid when idle so a finished run doesn't stick at the old count.
       if (!running && !starting) {
+        // Preserve edited prompts; only fill new slots from the catalog.
+        setPrompts((prev) => {
+          const catalog = pickShowcasePrompts(promptType, n);
+          return catalog.map((d, i) =>
+            i < prev.length && prev[i] != null && prev[i] !== "" ? prev[i] : d
+          );
+        });
         setStreams([]);
+        setViewingHistory(false);
       }
     },
-    [running, starting]
+    [running, starting, promptType]
+  );
+
+  const setPromptTypeSafe = useCallback(
+    (t: ShowcasePromptType) => {
+      setPromptType(t);
+      if (!running && !starting) {
+        setPrompts(pickShowcasePrompts(t, terminalCount));
+        setStreams([]);
+        setViewingHistory(false);
+      }
+    },
+    [running, starting, terminalCount]
   );
 
   const stopPolling = useCallback(() => {
@@ -583,6 +569,7 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
         temperature,
         thinking,
         modelId: modelId || undefined,
+        promptType,
         prompts: trimmed,
       });
       sessionIdRef.current = started.sessionId;
@@ -609,6 +596,7 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
     temperature,
     thinking,
     modelId,
+    promptType,
     pollOnce,
     schedulePoll,
   ]);
@@ -629,6 +617,13 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
         if (data.maxTokens != null) setMaxTokens(data.maxTokens);
         if (data.temperature != null) setTemperature(data.temperature);
         if (typeof data.thinking === "boolean") setThinking(data.thinking);
+        if (
+          data.promptType === "text" ||
+          data.promptType === "structural" ||
+          data.promptType === "mixed"
+        ) {
+          setPromptType(data.promptType);
+        }
         if (Array.isArray(data.streams) && data.streams.length) {
           setTerminalCount(data.streams.length);
           setPrompts(data.streams.map((s) => s.prompt || ""));
@@ -654,10 +649,24 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
       if (row.temperature != null) setTemperature(row.temperature);
       if (typeof row.thinking === "boolean") setThinking(row.thinking);
       if (row.modelId) setModelId(row.modelId);
+      if (
+        row.promptType === "text" ||
+        row.promptType === "structural" ||
+        row.promptType === "mixed"
+      ) {
+        setPromptType(row.promptType);
+      }
       // Load full session only for prompts
       void (async () => {
         try {
           const data = await getShowcase(sparkId, row.sessionId);
+          if (
+            data.promptType === "text" ||
+            data.promptType === "structural" ||
+            data.promptType === "mixed"
+          ) {
+            setPromptType(data.promptType);
+          }
           if (Array.isArray(data.streams) && data.streams.length) {
             setTerminalCount(data.streams.length);
             setPrompts(data.streams.map((s) => s.prompt || ""));
@@ -856,6 +865,25 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
                   ))}
                 </select>
               </label>
+              <label
+                className="showcase-field"
+                title={PROMPT_TYPES.find((t) => t.id === promptType)?.hint}
+              >
+                <span className="showcase-field__label">Prompt type</span>
+                <select
+                  value={promptType}
+                  disabled={controlsLocked}
+                  onChange={(e) =>
+                    setPromptTypeSafe(e.target.value as ShowcasePromptType)
+                  }
+                >
+                  {PROMPT_TYPES.map((t) => (
+                    <option key={t.id} value={t.id} title={t.hint}>
+                      {t.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
               <label className="showcase-field">
                 <span className="showcase-field__label">Max tokens</span>
                 <input
@@ -1030,6 +1058,9 @@ export function ShowcasePage({ sparkId }: ShowcasePageProps) {
                           </span>
                           <span>· :{row.port}</span>
                           <span>· {row.streamCount} term</span>
+                          {row.promptType ? (
+                            <span>· {row.promptType}</span>
+                          ) : null}
                           {row.meanDecodeTps > 0 && (
                             <span>· avg {row.meanDecodeTps.toFixed(0)} tok/s</span>
                           )}

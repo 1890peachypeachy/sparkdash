@@ -667,7 +667,7 @@ app.delete("/api/sparks/:id/llm/bench/:benchId", (req, res) => {
 /**
  * LLM Prompt Showcase — concurrent streaming demos.
  *
- * POST body: { port, modelId?, maxTokens?, temperature?, thinking?, prompts: string[] }
+ * POST body: { port, modelId?, maxTokens?, temperature?, thinking?, promptType?, prompts: string[] }
  * Returns 202 { sessionId }; poll GET for deltas; DELETE :sessionId to cancel.
  * Finished runs are archived; GET collection lists history; DELETE collection clears it.
  */
@@ -718,6 +718,7 @@ app.post("/api/sparks/:id/llm/showcase", (req, res) => {
       maxTokens: req.body?.maxTokens,
       temperature: req.body?.temperature,
       thinking: req.body?.thinking,
+      promptType: req.body?.promptType,
       prompts: req.body?.prompts,
     });
     res.status(202).json(result);

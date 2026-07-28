@@ -46,9 +46,10 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
-### Version 1.3.4 — Prompt Showcase model header & density
-- **Model header** — model id as a large centered banner above the metrics strip (not tucked under the spark name)
-- **Tighter chrome** — denser config fields, inputs, and buttons; page type ~1px smaller for more terminal space
+### Version 1.3.9 — Showcase prompt types, full-token fills & live tok/s
+- **Prompt types** — Text / Structural / Mixed catalogs for apples-to-apples tok/s scenarios
+- **Fill max tokens** — showcase streams force full-length generations (`min_tokens` + `ignore_eos`)
+- **Accurate live tok/s** — estimate from text while streaming (SSE chunks were under-counting)
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 

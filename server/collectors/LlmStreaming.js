@@ -109,6 +109,18 @@ export function pickDebugHeaders(headers) {
 }
 
 /**
+ * Rough completion-token estimate from visible text.
+ * SSE deltas often carry multiple tokens; counting events under-reports live tok/s.
+ * Final metrics still prefer server `usage.completion_tokens` when present.
+ * @param {string} text
+ */
+export function estimateTokenCount(text) {
+  if (!text || typeof text !== "string" || text.length === 0) return 0;
+  // ~4 chars/token for Latin / code; never less than 1 for non-empty text
+  return Math.max(1, Math.round(text.length / 4));
+}
+
+/**
  * Extract visible text pieces from an OpenAI-compatible delta (or choice.text).
  * Counts content + reasoning / reasoning_content so thinking models stay "alive".
  * Separates answer (`content`/`text`) from reasoning for display styling.
@@ -123,25 +135,25 @@ function extractDeltaPieces(choice) {
   if (delta && typeof delta === "object") {
     if (typeof delta.content === "string" && delta.content.length > 0) {
       answer = delta.content;
-      tokenChunks += 1;
+      tokenChunks += estimateTokenCount(delta.content);
     }
     // Prefer delta.reasoning; fall back to reasoning_content (don't double-count)
     if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) {
       reasoning = delta.reasoning;
-      tokenChunks += 1;
+      tokenChunks += estimateTokenCount(delta.reasoning);
     } else if (
       typeof delta.reasoning_content === "string" &&
       delta.reasoning_content.length > 0
     ) {
       reasoning = delta.reasoning_content;
-      tokenChunks += 1;
+      tokenChunks += estimateTokenCount(delta.reasoning_content);
     }
   }
 
   // Non-delta fallbacks (some backends)
   if (!answer && !reasoning && typeof choice?.text === "string" && choice.text.length > 0) {
     answer = choice.text;
-    tokenChunks = 1;
+    tokenChunks = estimateTokenCount(choice.text);
   }
 
   return { answer, reasoning, tokenChunks };

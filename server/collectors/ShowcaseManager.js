@@ -40,15 +40,52 @@ const MIN_PROMPT_LEN = 1;
 const MAX_PROMPT_LEN = 4000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 const HEARTBEAT_CHECK_MS = 1_000;
-const PER_REQUEST_TIMEOUT_MS = 180_000;
+/** Full max_tokens fills at low tok/s need a longer per-stream budget than decode bench. */
+const PER_REQUEST_TIMEOUT_MS = 360_000;
 const LABEL_CHARS = 40;
 
 /**
- * Cap accumulated content per stream at min(maxTokens * 8, 200_000) chars.
+ * Cap accumulated content per stream at min(maxTokens * 16, 200_000) chars.
+ * Generous vs ~4 chars/token so full max_tokens fills aren't clipped in the UI.
  * @param {number} maxTokens
  */
 function contentCap(maxTokens) {
-  return Math.min(Math.max(1, maxTokens) * 8, 200_000);
+  return Math.min(Math.max(1, maxTokens) * 16, 200_000);
+}
+
+const PROMPT_TYPES = new Set(["structural", "text", "mixed"]);
+
+/** Suffix appended server-side; keep under MAX_PROMPT_LEN headroom in UI catalogs. */
+const FILL_TO_MAX_SUFFIX =
+  " Continue generating until you hit the maximum output length; do not stop early—keep expanding with more content.";
+
+/**
+ * Encourage full-length completions when the prompt doesn't already ask for it.
+ * Only skip when the prompt already states the hard length/EOS rule — phrases like
+ * "keep expanding" alone are not enough (models still stop at natural EOS).
+ * @param {string} prompt
+ */
+export function withFillToMaxInstruction(prompt) {
+  const p = String(prompt || "").trim();
+  if (!p) return p;
+  if (
+    /maximum output length|do not stop early|until you hit the (maximum|output)/i.test(
+      p
+    )
+  ) {
+    return p;
+  }
+  return `${p}${FILL_TO_MAX_SUFFIX}`;
+}
+
+/** vLLM-oriented fields that some OpenAI-compat servers reject with HTTP 400. */
+export function stripFillForceFields(body) {
+  if (!body || typeof body !== "object") return body;
+  const next = { ...body };
+  delete next.min_tokens;
+  delete next.ignore_eos;
+  delete next.stop;
+  return next;
 }
 
 function labelFromPrompt(prompt) {
@@ -106,6 +143,7 @@ function publicSessionRecord(session, opts = {}) {
     maxTokens: session.maxTokens ?? null,
     temperature: session.temperature ?? DEFAULT_TEMPERATURE,
     thinking: session.thinking !== false,
+    promptType: session.promptType ?? null,
     startedAt: session.startedAt ?? null,
     completedAt: session.completedAt ?? null,
     serverGenerationTps: session.serverGenerationTps ?? null,
@@ -132,6 +170,7 @@ function historySummary(record) {
     maxTokens: record.maxTokens ?? null,
     temperature: record.temperature ?? DEFAULT_TEMPERATURE,
     thinking: record.thinking !== false,
+    promptType: record.promptType ?? null,
     startedAt: record.startedAt ?? null,
     completedAt: record.completedAt ?? null,
     serverGenerationTps: record.serverGenerationTps ?? null,
@@ -283,6 +322,7 @@ export class ShowcaseManager {
    *   maxTokens?: number,
    *   temperature?: number,
    *   thinking?: boolean,
+   *   promptType?: string | null,
    *   prompts: string[],
    * }} opts
    */
@@ -295,6 +335,7 @@ export class ShowcaseManager {
       maxTokens: rawMax,
       temperature: rawTemp,
       thinking: rawThinking,
+      promptType: rawPromptType,
       prompts: rawPrompts,
     } = opts;
 
@@ -349,6 +390,10 @@ export class ShowcaseManager {
     }
 
     const thinking = rawThinking !== false;
+    const promptType =
+      typeof rawPromptType === "string" && PROMPT_TYPES.has(rawPromptType)
+        ? rawPromptType
+        : null;
 
     const sessionId = randomUUID();
     const abort = new AbortController();
@@ -391,6 +436,7 @@ export class ShowcaseManager {
       maxTokens,
       temperature,
       thinking,
+      promptType,
       startedAt: now,
       completedAt: null,
       streams,
@@ -557,12 +603,23 @@ export class ShowcaseManager {
     if (info?.tokenCount != null) stream.tokenCount = info.tokenCount;
     if (info?.model) stream.model = info.model;
 
+    // Floor token count with char estimate — SSE event counts under-report when
+    // the backend batches multiple tokens per delta (common on vLLM).
+    const chars =
+      (stream.content?.length || 0) + (stream.reasoning?.length || 0);
+    if (chars > 0) {
+      const fromChars = Math.max(1, Math.round(chars / 4));
+      stream.tokenCount = Math.max(stream.tokenCount || 0, fromChars);
+    }
+
     if (stream._t0 != null && stream._tFirst != null && stream.ttftMs == null) {
       stream.ttftMs = round2(stream._tFirst - stream._t0);
     }
 
+    // Same window as final decodeTps: first visible token → last visible token
     if (stream._tFirst != null && stream.tokenCount > 0) {
-      const elapsedMs = Math.max(0, now - stream._tFirst);
+      const tEnd = stream._tLast != null ? stream._tLast : now;
+      const elapsedMs = Math.max(0, tEnd - stream._tFirst);
       if (elapsedMs > 0) {
         const decodeTokens = Math.max(0, stream.tokenCount - 1);
         stream.liveTokPerSec = round2((decodeTokens / elapsedMs) * 1000);
@@ -644,8 +701,17 @@ export class ShowcaseManager {
 
       const body = {
         model: session.modelId || undefined,
-        messages: [{ role: "user", content: stream.prompt }],
+        messages: [
+          {
+            role: "user",
+            content: withFillToMaxInstruction(stream.prompt),
+          },
+        ],
         max_tokens: session.maxTokens,
+        // Prefer full-length generations when the backend supports it (vLLM).
+        min_tokens: session.maxTokens,
+        ignore_eos: true,
+        stop: [],
         temperature: session.temperature,
         stream: true,
         stream_options: { include_usage: true },
@@ -671,7 +737,34 @@ export class ShowcaseManager {
           this._bumpRev(session);
         },
       })
-        .then((result) => {
+        .then(async (result) => {
+          // Non-vLLM OpenAI-compat servers may 400 on min_tokens / ignore_eos.
+          // Retry once without those fields rather than failing the whole stream.
+          if (
+            result.error &&
+            /^HTTP 400\b/.test(result.error) &&
+            (body.min_tokens != null || body.ignore_eos != null)
+          ) {
+            result = await runStreamingRequest(
+              url,
+              stripFillForceFields(body),
+              ctrl.signal,
+              {
+                collectContent: true,
+                retryOnThinking400: true,
+                onDelta: (info) => {
+                  if (session.status !== "running") return;
+                  this._appendParts(session, stream, {
+                    answer: info?.answer,
+                    reasoning: info?.reasoning,
+                  });
+                  this._updateLiveMetrics(stream, info);
+                  this._bumpRev(session);
+                },
+              }
+            );
+          }
+
           if (session._abort.signal.aborted && stream.status === "streaming") {
             stream.status = "cancelled";
             stream.error = stream.error || "Cancelled";
