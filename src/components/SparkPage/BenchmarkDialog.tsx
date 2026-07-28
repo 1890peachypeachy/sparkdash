@@ -127,7 +127,7 @@ function ResultRow({ r }: { r: DecodeBenchJob["results"][number] }) {
           </span>
         </div>
         <div className="bench-result-row__metric">
-          <span className="bench-result-row__label">/stream</span>
+          <span className="bench-result-row__label">Stream</span>
           <span className="bench-result-row__value">
             {r.meanDecodeTps.toFixed(1)}
             <span className="bench-result-row__unit">tok/s</span>
@@ -505,7 +505,7 @@ export function BenchmarkDialog({
                     <span>Load</span>
                     <span className="bench-results__head-speeds">
                       <span>Aggregate</span>
-                      <span>/stream</span>
+                      <span>Stream</span>
                     </span>
                   </div>
                   {job.results.map((r) => (
@@ -517,7 +517,7 @@ export function BenchmarkDialog({
               {job.results.length > 0 && (
                 <p className="bench-legend">
                   <strong>Aggregate</strong> — total tok/s across all concurrent streams.{" "}
-                  <strong>/stream</strong> — per-stream average.
+                  <strong>Stream</strong> — per-stream average.
                 </p>
               )}
             </section>
