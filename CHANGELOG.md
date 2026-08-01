@@ -10,7 +10,8 @@ Format: version sections are listed newest first.
 ## [1.4.7] — 2026-08-02
 
 ### Added
-- **ds4-server LLM probe** — auto-detect Entrpi/ds4-on-spark via `owned_by: ds4.c` or Prometheus `ds4_*` series; model/`context_length` from `/v1/models`; live tok/s from `ds4_tokens_*` counter diffs
+- **SGLang and DwarfStar (ds4-server) properly supported in LLM probes** — correct backend detection, model/context, and live tok/s for both engines alongside vLLM and llama.cpp
+- **ds4-server / DwarfStar LLM probe** — auto-detect Entrpi/ds4-on-spark via `owned_by: ds4.c` or Prometheus `ds4_*` series; model/`context_length` from `/v1/models`; live tok/s from `ds4_tokens_*` counter diffs
 - **`llmProbeHost`** — local Sparks probe `127.0.0.1` so loopback-bound servers (ds4 `start.sh` default `--host 127.0.0.1`) are reachable; Showcase / Decode bench / connectivity test use the same host
 - **Docker host networking** — compose uses `network_mode: host` so the container can reach host loopback LLM ports
 

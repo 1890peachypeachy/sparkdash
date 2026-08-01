@@ -47,7 +47,8 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 ## Latest version changelog
 
 ### Version 1.4.7 — ds4-server probe, SGLang live tok/s, local loopback
-- **ds4-server** — detect Entrpi/ds4-on-spark (`owned_by: ds4.c` / `ds4_*` metrics); live tok/s from token counter diffs
+- **SGLang & DwarfStar** — properly supported in LLM probes (detect, model/context, live tok/s)
+- **ds4-server / DwarfStar** — detect Entrpi/ds4-on-spark (`owned_by: ds4.c` / `ds4_*` metrics); live tok/s from token counter diffs
 - **SGLang tok/s** — when Prometheus metrics are off, use `last_gen_throughput` only while it changes; idle → 0
 - **Local LLM bind** — `isLocal` Sparks probe `127.0.0.1` (matches ds4 `start.sh` default); Docker uses host networking
 - **vLLM / llama.cpp** — regression coverage so ds4/sglang paths do not alter those backends
