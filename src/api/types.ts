@@ -165,7 +165,7 @@ export interface UnifiedMemoryMetrics {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
-  backend: "vllm" | "llama.cpp" | "sglang" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
   modelId: string | null;
   modelPath: string | null;
   contextLength: number | null;

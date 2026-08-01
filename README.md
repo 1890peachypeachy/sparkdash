@@ -46,17 +46,19 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
+### Version 1.4.7 — ds4-server probe, SGLang live tok/s, local loopback
+- **ds4-server** — detect Entrpi/ds4-on-spark (`owned_by: ds4.c` / `ds4_*` metrics); live tok/s from token counter diffs
+- **SGLang tok/s** — when Prometheus metrics are off, use `last_gen_throughput` only while it changes; idle → 0
+- **Local LLM bind** — `isLocal` Sparks probe `127.0.0.1` (matches ds4 `start.sh` default); Docker uses host networking
+- **vLLM / llama.cpp** — regression coverage so ds4/sglang paths do not alter those backends
+
+Full history: [CHANGELOG.md](./CHANGELOG.md)
+
 ### Version 1.4.5 — SGLang detect, model wrap, decode concurrencies
 - **SGLang detection** — correct backend badge; HF cache paths shortened to `org/name` ([#29](https://github.com/MiaAI-Lab/sparkDash/pull/29))
 - **Model name wrap** — overview / LLM panel show full model id (wrap, no ellipsis trim)
 - **Decode concurrencies** — 5, 10, 12, 24 ([#27](https://github.com/MiaAI-Lab/sparkDash/pull/27))
 - **API key port renames** — migrate/prune keys; “Bad API key” on reject ([#26](https://github.com/MiaAI-Lab/sparkDash/pull/26))
-
-Full history: [CHANGELOG.md](./CHANGELOG.md)
-
-### Version 1.4.4 — Optional LLM API key
-- **Per-port API key** — optional Bearer token in LLM Settings for authenticated OpenAI-compatible gateways; encrypted at rest ([#21](https://github.com/MiaAI-Lab/sparkDash/issues/21))
-- **Settings version** — footer shows the real `package.json` version
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -69,7 +71,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Multi-unit** | Any number of Sparks; each has a tabbed detail page plus a shared Overview |
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
-| **LLM probe** | Auto-detects llama.cpp, vLLM, or sglang; live tok/s per server |
+| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live tok/s per server |
 | **Decode benchmark** | Multi-concurrency streaming decode tok/s (server + per-stream), persisted last run |
 | **Prompt Showcase** | Full-page multi-terminal LLM streaming demo (up to 32 prompts) with live tok/s and copy-out |
 | **vLLM health** | KV cache %, run/wait queue, TTFT/E2E/ITL p95, preemptions, prefix cache, MTP accept from Prometheus `/metrics` |
@@ -325,9 +327,10 @@ Name, IP, SSH credentials, LLM port, and device/interface filters update the run
 Each configured LLM port gets its own `LlmProbe` instance running in parallel. Probes auto-detect backends:
 
 - **llama.cpp** — `/slots` for live decode rates; model from `/props`
-- **vLLM / sglang** — `/v1/models`; sglang via `/get_server_info`, vLLM via Prometheus `/metrics` counters (scientific notation supported)
+- **ds4-server** (Entrpi/ds4-on-spark) — `/v1/models` (`owned_by: ds4.c`) + Prometheus `ds4_*` token counters for live tok/s
+- **vLLM / sglang** — `/v1/models`; sglang via `/get_server_info` (`last_gen_throughput` when metrics off), vLLM via Prometheus `/metrics` counters (scientific notation supported)
 
-Rates are derived from per-probe cumulative counter diffs. Multiple ports can be added or removed at runtime without restarting the monitor.
+Rates are derived from per-probe cumulative counter diffs (or SGLang sticky throughput while it moves). Multiple ports can be added or removed at runtime without restarting the monitor.
 
 ---
 

@@ -251,7 +251,15 @@ function SparkCard({
               if (!llm) return null;
               return (
                 <MiniStat
-                  label={llm.backend === "vllm" ? "vLLM" : llm.backend ?? "LLM"}
+                  label={
+                    llm.backend === "vllm"
+                      ? "vLLM"
+                      : llm.backend === "ds4"
+                        ? "ds4"
+                        : llm.backend === "sglang"
+                          ? "sgLang"
+                          : llm.backend ?? "LLM"
+                  }
                   value={llm.modelId ?? "unknown"}
                   tone="accent"
                   title={llm.modelId ?? undefined}

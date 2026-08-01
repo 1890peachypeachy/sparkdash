@@ -123,3 +123,131 @@ test("_detectServerType: OpenAI models without SGLang endpoints → vllm", async
   await probe._detectServerType();
   assert.equal(probe.backendType, "vllm");
 });
+
+test("_sglangLastGenThroughput: reads internal_states when totals missing", () => {
+  assert.equal(
+    LlmProbe._sglangLastGenThroughput({
+      internal_states: [{ last_gen_throughput: 29.746 }],
+    }),
+    29.746
+  );
+  assert.equal(
+    LlmProbe._sglangLastGenThroughput({
+      last_gen_throughput: 12.5,
+      internal_states: [{ last_gen_throughput: 1 }],
+    }),
+    12.5
+  );
+  assert.equal(
+    LlmProbe._sglangLastGenThroughput({
+      internal_states: [
+        { last_gen_throughput: 10 },
+        { last_gen_throughput: 40 },
+      ],
+    }),
+    40
+  );
+  assert.equal(LlmProbe._sglangLastGenThroughput({}), null);
+});
+
+test("_applySglangServerInfo: last_gen_throughput when no total_* counters", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  const info = {
+    context_length: 1048576,
+    max_total_num_tokens: 1142712,
+    max_running_requests: 16,
+    model_path:
+      "/root/.cache/huggingface/models--thinkingmachines--Inkling-Small-NVFP4/snapshots/abc",
+    internal_states: [{ last_gen_throughput: 29.746 }],
+  };
+  // First sample seeds sticky gauge but stays 0 (stale leftover)
+  probe._applySglangServerInfo(info, 2);
+  assert.equal(probe.generationTps, 0);
+  assert.equal(probe.contextLength, 1142712);
+  assert.equal(probe.slotsTotal, 16);
+  assert.equal(probe.modelId, "thinkingmachines/Inkling-Small-NVFP4");
+
+  // Unchanged sticky value → still 0
+  probe._applySglangServerInfo(info, 2);
+  assert.equal(probe.generationTps, 0);
+
+  // Value moves → live
+  probe._applySglangServerInfo(
+    { ...info, internal_states: [{ last_gen_throughput: 41.2 }] },
+    2
+  );
+  assert.equal(probe.generationTps, 41.2);
+});
+
+test("_sglangStickyThroughput: expires to 0 after live window", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  assert.equal(probe._sglangStickyThroughput(10), 0); // seed
+  assert.equal(probe._sglangStickyThroughput(20), 20); // change → live
+  probe._sglangStickyTps.liveUntil = Date.now() - 1;
+  assert.equal(probe._sglangStickyThroughput(20), 0);
+});
+
+test("_applySglangServerInfo: prefers total_* counter diffs over last_gen", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe.lastTokenCounts = { input: 100, output: 50 };
+  probe._applySglangServerInfo(
+    {
+      total_input_tokens: 300,
+      total_output_tokens: 150,
+      internal_states: [{ last_gen_throughput: 999 }],
+    },
+    2
+  );
+  assert.equal(probe.generationTps, 50); // (150-50)/2
+  assert.equal(probe.prefillTps, 100); // (300-100)/2
+  assert.equal(probe.totalOutputTokens, 150);
+});
+
+test("probe: modern sglang without totals still reports last_gen tok/s", async () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe.serverIsOpenAI = true;
+  probe.backendType = "sglang";
+  probe.authOpen = true;
+  probe._lastDetectAt = Date.now();
+  probe.lastProbeTime = Date.now() - 2000;
+  let gen = 30;
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/v1/models")) {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          data: [{ id: "inkling-small", owned_by: "sglang", max_model_len: 1048576 }],
+        }),
+      };
+    }
+    if (u.endsWith("/get_server_info")) {
+      const throughput = gen;
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          model_path: "/data/models--org--Name/snapshots/x",
+          context_length: 1048576,
+          internal_states: [{ last_gen_throughput: throughput }],
+        }),
+      };
+    }
+    if (u.endsWith("/get_model_info") || u.endsWith("/model_info")) {
+      return { ok: false, status: 404, json: async () => ({}) };
+    }
+    if (u.endsWith("/metrics")) {
+      return { ok: false, status: 404, text: async () => "", json: async () => ({}) };
+    }
+    return { ok: false, status: 404, json: async () => ({}), text: async () => "" };
+  };
+  const seed = await probe.probe();
+  assert.equal(seed.generationTps, 0);
+  gen = 41.2;
+  probe.lastProbeTime = Date.now() - 2000;
+  const snap = await probe.probe();
+  assert.equal(snap.backend, "sglang");
+  assert.equal(snap.generationTps, 41.2);
+  assert.equal(snap.available, true);
+});
