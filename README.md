@@ -46,20 +46,10 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
-### Version 1.4.7 — ds4-server probe, SGLang live tok/s, local loopback
-- **SGLang & DwarfStar** — properly supported in LLM probes (detect, model/context, live tok/s)
-- **ds4-server / DwarfStar** — detect Entrpi/ds4-on-spark (`owned_by: ds4.c` / `ds4_*` metrics); live tok/s from token counter diffs
-- **SGLang tok/s** — when Prometheus metrics are off, use `last_gen_throughput` only while it changes; idle → 0
-- **Local LLM bind** — `isLocal` Sparks probe `127.0.0.1` (matches ds4 `start.sh` default); Docker uses host networking
-- **vLLM / llama.cpp** — regression coverage so ds4/sglang paths do not alter those backends
-
-Full history: [CHANGELOG.md](./CHANGELOG.md)
-
-### Version 1.4.5 — SGLang detect, model wrap, decode concurrencies
-- **SGLang detection** — correct backend badge; HF cache paths shortened to `org/name` ([#29](https://github.com/MiaAI-Lab/sparkDash/pull/29))
-- **Model name wrap** — overview / LLM panel show full model id (wrap, no ellipsis trim)
-- **Decode concurrencies** — 5, 10, 12, 24 ([#27](https://github.com/MiaAI-Lab/sparkDash/pull/27))
-- **API key port renames** — migrate/prune keys; “Bad API key” on reject ([#26](https://github.com/MiaAI-Lab/sparkDash/pull/26))
+### Version 1.5.0 — GPU thermal throttle meter
+- **Throttle signal** — NVIDIA `clocks_throttle_reasons` (thermal / HW / power cap) + SM clock headroom from `nvidia-smi` (local + remote)
+- **GPU panel** — Throttle chip (`OK` / `Thermal` / `Power` / `HW`) with SM clock bar and reason tooltip
+- **Overview** — red “Thermal throttle” hint when any Spark is thermally throttling
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 

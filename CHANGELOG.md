@@ -7,6 +7,15 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.5.0] — 2026-08-03
+
+### Added
+- **GPU thermal throttle meter** — collect NVIDIA `clocks_throttle_reasons` (HW/SW thermal, HW slowdown, SW power cap) plus SM current/max clocks via `nvidia-smi` (local and remote)
+- **GPU panel Throttle row** — status chip (`OK` / `Thermal` / `Power` / `HW`) with SM clock bar and tooltip of active reasons
+- **Overview thermal hint** — compact red “Thermal throttle” banner when any Spark reports thermal slowdown
+
+---
+
 ## [1.4.7] — 2026-08-02
 
 ### Added
