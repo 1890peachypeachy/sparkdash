@@ -19,7 +19,7 @@ const SGLANG_STICKY_TPS_LIVE_MS = 6_000;
 
 /**
  * Prefer a short model id when the server returns a Hugging Face hub cache path.
- * e.g. /root/.cache/huggingface/models--org--Name/snapshots/<hash>
+ * e.g. /root/.cache/huggingface/hub/models--org--Name/snapshots/<hash>
  *   → org/Name
  * @param {unknown} id
  * @returns {string | null}
@@ -36,6 +36,24 @@ export function normalizeModelId(id) {
   if (mid) return mid[1].replace(/--/g, "/");
 
   return s;
+}
+
+/** True when `id` looks like a Hugging Face hub cache directory (models--org--name). */
+export function isHfHubCachePath(id) {
+  if (id == null) return false;
+  return /(?:^|\/)models--[^/]+/.test(String(id));
+}
+
+/**
+ * Set modelId (always normalized) and modelPath (omit HF hub cache paths —
+ * they duplicate the short id and clutter the LLM panel).
+ * @param {unknown} raw
+ */
+function applyModelRef(probe, raw) {
+  if (raw == null || raw === "") return;
+  const s = String(raw);
+  probe.modelId = normalizeModelId(s);
+  probe.modelPath = isHfHubCachePath(s) ? null : s;
 }
 
 export class LlmProbe {
@@ -311,6 +329,8 @@ export class LlmProbe {
         const modelsData = await modelsRes.json();
         const model = modelsData?.data?.[0];
         this.modelId = normalizeModelId(model?.id || null);
+        // Drop HF hub cache paths from modelPath if /v1/models id was a cache dir
+        if (isHfHubCachePath(model?.id)) this.modelPath = null;
         // ds4-server uses context_length; vLLM uses max_model_len
         this.contextLength =
           model?.max_model_len ?? model?.context_length ?? this.contextLength;
@@ -537,15 +557,23 @@ export class LlmProbe {
    * @param {number} dtSec
    */
   _applySglangServerInfo(sgData, dtSec) {
-    this.contextLength =
-      sgData.max_total_tokens ||
-      sgData.max_total_num_tokens ||
-      sgData.context_length ||
-      this.contextLength;
+    // Prefer true max context (context_length / max_total_tokens). Do NOT use
+    // max_total_num_tokens — that is the KV-cache pool budget across concurrent
+    // sequences and is often ~2× the configured context (showed 2.1M for a 1M run).
+    const explicitCtx =
+      LlmProbe._positiveNumber(sgData.context_length) ??
+      LlmProbe._positiveNumber(sgData.max_total_tokens);
+    if (explicitCtx != null) {
+      this.contextLength = explicitCtx;
+    } else if (this.contextLength == null) {
+      this.contextLength =
+        LlmProbe._positiveNumber(sgData.max_req_input_len) ??
+        LlmProbe._positiveNumber(sgData.max_total_num_tokens) ??
+        null;
+    }
 
     if (sgData.model_path) {
-      this.modelPath = String(sgData.model_path);
-      this.modelId = normalizeModelId(sgData.model_path);
+      applyModelRef(this, sgData.model_path);
     }
 
     const maxRunning = Number(sgData.max_running_requests);
@@ -611,6 +639,15 @@ export class LlmProbe {
       return rounded;
     }
     return 0;
+  }
+
+  /**
+   * @param {unknown} v
+   * @returns {number | null}
+   */
+  static _positiveNumber(v) {
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : null;
   }
 
   /**
@@ -688,8 +725,7 @@ export class LlmProbe {
         const data = await res.json();
         const raw = data?.model_path || data?.tokenizer_path;
         if (!raw) continue;
-        this.modelPath = String(raw);
-        this.modelId = normalizeModelId(raw);
+        applyModelRef(this, raw);
         return;
       } catch {
         /* try next */
@@ -754,8 +790,13 @@ export class LlmProbe {
       const propsRes = await this._fetch(`${this.baseUrl}/props`);
       if (propsRes.ok) {
         const props = await propsRes.json();
-        this.modelId = props.model_alias || props.model_path || this.modelId;
-        this.modelPath = props.model_path || null;
+        const raw = props.model_alias || props.model_path || this.modelId;
+        if (props.model_path && !isHfHubCachePath(props.model_path)) {
+          this.modelPath = props.model_path;
+        } else if (isHfHubCachePath(props.model_path) || isHfHubCachePath(props.model_alias)) {
+          this.modelPath = null;
+        }
+        if (raw) this.modelId = normalizeModelId(raw);
         this.contextLength = props.total_context_length || props.context_length || this.contextLength;
       }
     } catch {}

@@ -28,6 +28,30 @@ test("normalizeModelId: null/empty → null", () => {
   assert.equal(normalizeModelId("   "), null);
 });
 
+test("normalizeModelId: huggingface/hub cache path with hub/ segment", () => {
+  assert.equal(
+    normalizeModelId(
+      "/root/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/9e165c30e2704aec5d9d593cce3eebd58bbef1cb"
+    ),
+    "deepseek-ai/DeepSeek-V4-Flash-0731"
+  );
+});
+
+test("applyModelRef via sglang info: hub path → short id, no modelPath clutter", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe._applySglangServerInfo(
+    {
+      model_path:
+        "/root/.cache/huggingface/hub/models--deepseek-ai--DeepSeek-V4-Flash-0731/snapshots/abc",
+      context_length: 128000,
+      internal_states: [{ last_gen_throughput: 0 }],
+    },
+    2
+  );
+  assert.equal(probe.modelId, "deepseek-ai/DeepSeek-V4-Flash-0731");
+  assert.equal(probe.modelPath, null);
+});
+
 test("_probeIsSglang: true when /get_server_info returns JSON object", async () => {
   const probe = new LlmProbe({ lanIp: "127.0.0.1" }, 30000);
   probe._fetch = async (url) => {
@@ -154,7 +178,7 @@ test("_applySglangServerInfo: last_gen_throughput when no total_* counters", () 
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
   const info = {
     context_length: 1048576,
-    max_total_num_tokens: 1142712,
+    max_total_num_tokens: 2178048,
     max_running_requests: 16,
     model_path:
       "/root/.cache/huggingface/models--thinkingmachines--Inkling-Small-NVFP4/snapshots/abc",
@@ -163,7 +187,7 @@ test("_applySglangServerInfo: last_gen_throughput when no total_* counters", () 
   // First sample seeds sticky gauge but stays 0 (stale leftover)
   probe._applySglangServerInfo(info, 2);
   assert.equal(probe.generationTps, 0);
-  assert.equal(probe.contextLength, 1142712);
+  assert.equal(probe.contextLength, 1048576);
   assert.equal(probe.slotsTotal, 16);
   assert.equal(probe.modelId, "thinkingmachines/Inkling-Small-NVFP4");
 
@@ -177,6 +201,21 @@ test("_applySglangServerInfo: last_gen_throughput when no total_* counters", () 
     2
   );
   assert.equal(probe.generationTps, 41.2);
+});
+
+test("_applySglangServerInfo: does not overwrite max_model_len with KV pool size", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 30000);
+  probe.contextLength = 1048576; // already from /v1/models max_model_len
+  probe._applySglangServerInfo(
+    {
+      context_length: null,
+      max_total_tokens: null,
+      max_total_num_tokens: 2178048,
+      max_req_input_len: 1048570,
+    },
+    2
+  );
+  assert.equal(probe.contextLength, 1048576);
 });
 
 test("_sglangStickyThroughput: expires to 0 after live window", () => {
