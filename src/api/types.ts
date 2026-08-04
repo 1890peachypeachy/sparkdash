@@ -323,6 +323,10 @@ export interface DecodeBenchConfig {
 export interface DecodeBenchStreamResult {
   index: number;
   ttftMs: number;
+  /** First answer token (post-reasoning) in ms from request start; null when the reply never leaves the reasoning phase. */
+  ttftContentMs: number | null;
+  /** Number of streamed chunks that carried reasoning (not answer) text. */
+  reasoningChunks: number;
   decodeTps: number;
   decodeTokens: number;
   completionTokens: number;
