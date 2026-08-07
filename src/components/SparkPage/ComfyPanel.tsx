@@ -1,10 +1,13 @@
-import type { ComfyJob, ComfyMetrics } from "../../api/types";
+import { useState, useCallback } from "react";
+import type { ComfyJob, ComfyMetrics, ComfyProgress } from "../../api/types";
+import { cancelComfyJob } from "../../api/client";
 import { Panel } from "../ui/Panel";
-import { ComfyIcon } from "../ui/icons";
+import { ComfyIcon, ExternalLinkIcon } from "../ui/icons";
 
 interface ComfyPanelProps {
   comfy: ComfyMetrics | null;
   comfyPort: number;
+  sparkId: string;
   className?: string;
 }
 
@@ -15,7 +18,6 @@ function shortId(id: string): string {
 
 function formatElapsed(createTimeMs: number | null | undefined): string | null {
   if (createTimeMs == null || !Number.isFinite(createTimeMs)) return null;
-  // Comfy create_time is usually ms epoch; tolerate seconds.
   const ms = createTimeMs < 1e12 ? createTimeMs * 1000 : createTimeMs;
   const elapsedSec = Math.max(0, Math.floor((Date.now() - ms) / 1000));
   if (elapsedSec < 60) return `${elapsedSec}s`;
@@ -24,6 +26,22 @@ function formatElapsed(createTimeMs: number | null | undefined): string | null {
   if (m < 60) return `${m}m ${s}s`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m`;
+}
+
+function formatDurationMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms < 0) return null;
+  const sec = Math.round(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return s ? `${m}m ${s}s` : `${m}m`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function formatEtaMs(ms: number | null | undefined): string | null {
+  if (ms == null || !Number.isFinite(ms) || ms <= 0) return null;
+  return `~${formatDurationMs(ms)}`;
 }
 
 function jobFootprint(job: ComfyJob): string {
@@ -38,12 +56,58 @@ function jobFootprint(job: ComfyJob): string {
   return parts.join(" · ");
 }
 
+function ProgressBar({ progress }: { progress: ComfyProgress }) {
+  const pct =
+    progress.percent != null
+      ? progress.percent
+      : progress.max > 0
+        ? Math.min(100, Math.round((progress.value / progress.max) * 100))
+        : 0;
+  const label =
+    progress.nodeLabel ||
+    (progress.source === "estimate" ? "Elapsed (est.)" : "Progress");
+  const detail =
+    progress.max > 0 && progress.source === "ws"
+      ? `${Math.round(progress.value)}/${Math.round(progress.max)}`
+      : progress.percent != null
+        ? `${pct}%`
+        : null;
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-baseline justify-between gap-2 text-[11px]">
+        <span className="truncate text-muted" title={label}>
+          {label}
+          {progress.source === "estimate" ? (
+            <span className="ml-1 text-[10px] opacity-70">est.</span>
+          ) : null}
+        </span>
+        {detail ? <span className="font-tabular text-text">{detail}</span> : null}
+      </div>
+      <div className="h-1.5 overflow-hidden rounded-full bg-border">
+        <div
+          className="h-full rounded-full bg-accent transition-[width] duration-300"
+          style={{ width: `${Math.min(100, Math.max(0, pct))}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
 function JobBlock({
   job,
   variant,
+  progress,
+  etaLabel,
+  onCancel,
+  cancelling,
 }: {
   job: ComfyJob;
   variant: "running" | "pending";
+  progress?: ComfyProgress | null;
+  etaLabel?: string | null;
+  onCancel?: () => void;
+  cancelling?: boolean;
 }) {
   const title = job.title?.trim() || shortId(job.id);
   const footprint = jobFootprint(job);
@@ -53,7 +117,7 @@ function JobBlock({
   return (
     <div className="space-y-2 rounded-md border border-border bg-surface-elevated/40 px-3 py-2.5">
       <div className="flex items-start justify-between gap-2">
-        <div className="min-w-0">
+        <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">
             <span
               className={`llm-badge ${variant === "running" ? "" : "opacity-80"}`}
@@ -67,8 +131,11 @@ function JobBlock({
               {variant === "running" ? "Running" : "Queued"}
             </span>
             {elapsed ? (
-              <span className="font-tabular text-[11px] text-muted" title="Elapsed since queue entry">
-                {elapsed}
+              <span className="font-tabular text-[11px] text-muted">{elapsed}</span>
+            ) : null}
+            {etaLabel ? (
+              <span className="font-tabular text-[11px] text-muted" title="Estimated time remaining">
+                {etaLabel} left
               </span>
             ) : null}
           </div>
@@ -76,7 +143,19 @@ function JobBlock({
             {title}
           </p>
         </div>
+        {onCancel ? (
+          <button
+            type="button"
+            onClick={onCancel}
+            disabled={cancelling}
+            className="shrink-0 rounded border border-border px-2 py-0.5 text-[11px] text-muted transition-colors hover:border-danger hover:text-danger disabled:opacity-50"
+          >
+            {cancelling ? "…" : variant === "running" ? "Cancel" : "Remove"}
+          </button>
+        ) : null}
       </div>
+
+      {variant === "running" && progress ? <ProgressBar progress={progress} /> : null}
 
       {footprint ? (
         <p className="font-tabular text-[11px] text-muted" title="Workflow compute footprint">
@@ -89,11 +168,7 @@ function JobBlock({
           <div className="text-[10px] uppercase tracking-wide text-muted">Models</div>
           <ul className="space-y-0.5">
             {models.slice(0, 6).map((m) => (
-              <li
-                key={m}
-                className="truncate font-tabular text-[12px] text-text"
-                title={m}
-              >
+              <li key={m} className="truncate font-tabular text-[12px] text-text" title={m}>
                 {m}
               </li>
             ))}
@@ -102,18 +177,41 @@ function JobBlock({
             ) : null}
           </ul>
         </div>
-      ) : (
-        <p className="text-[11px] text-muted">No model files found in this graph.</p>
-      )}
+      ) : null}
     </div>
   );
 }
 
-export function ComfyPanel({ comfy, comfyPort, className = "" }: ComfyPanelProps) {
+export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyPanelProps) {
   const available = Boolean(comfy?.available);
   const pending = comfy?.queuePending ?? 0;
   const active = comfy?.activeJob ?? null;
   const pendingJobs = comfy?.pendingJobs ?? [];
+  const progress = comfy?.progress ?? null;
+  const lastJob = comfy?.lastJob ?? null;
+  const modelsInstalled = comfy?.modelsInstalled ?? null;
+  const etaLabel = formatEtaMs(comfy?.queueEtaMs ?? null);
+  const openUrl = comfy?.openUrl ?? `http://127.0.0.1:${comfyPort}`;
+
+  const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
+  const [modelsOpen, setModelsOpen] = useState(false);
+
+  const handleCancel = useCallback(
+    async (promptId: string) => {
+      if (!confirm("Cancel this ComfyUI job?")) return;
+      setActionError(null);
+      setCancellingId(promptId);
+      try {
+        await cancelComfyJob(sparkId, promptId);
+      } catch (err) {
+        setActionError(err instanceof Error ? err.message : String(err));
+      } finally {
+        setCancellingId(null);
+      }
+    },
+    [sparkId]
+  );
 
   return (
     <Panel
@@ -123,16 +221,28 @@ export function ComfyPanel({ comfy, comfyPort, className = "" }: ComfyPanelProps
       bodyClassName="space-y-3"
       accent
       actions={
-        <span className="font-tabular text-[11px] text-muted" title="Probe port">
-          :{comfyPort}
-        </span>
+        <div className="flex items-center gap-2">
+          <span className="font-tabular text-[11px] text-muted" title="Probe port">
+            :{comfyPort}
+          </span>
+          <a
+            href={openUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            title={`Open ComfyUI (${openUrl}) — host must be reachable from your browser`}
+            className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-accent"
+          >
+            <ExternalLinkIcon className="h-3 w-3" />
+            Open
+          </a>
+        </div>
       }
     >
       {!available ? (
         <div className="space-y-1 text-sm">
           <p className="text-muted">Not reachable</p>
           {comfy?.error ? (
-            <p className="text-[11px] text-muted break-all">{comfy.error}</p>
+            <p className="break-all text-[11px] text-muted">{comfy.error}</p>
           ) : (
             <p className="text-[11px] text-muted">
               Ensure ComfyUI is running on this host (default port 8188).
@@ -163,11 +273,44 @@ export function ComfyPanel({ comfy, comfyPort, className = "" }: ComfyPanelProps
             ) : null}
           </div>
 
+          {actionError ? (
+            <p className="text-[11px] text-danger">{actionError}</p>
+          ) : null}
+
           {active ? (
-            <JobBlock job={active} variant="running" />
+            <JobBlock
+              job={active}
+              variant="running"
+              progress={progress}
+              etaLabel={etaLabel}
+              onCancel={() => void handleCancel(active.id)}
+              cancelling={cancellingId === active.id}
+            />
           ) : (
-            <div className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-muted">
-              Idle — no running job
+            <div className="space-y-2">
+              <div className="rounded-md border border-dashed border-border px-3 py-3 text-sm text-muted">
+                Idle — no running job
+              </div>
+              {lastJob ? (
+                <p
+                  className={`text-[11px] ${
+                    lastJob.status === "failed"
+                      ? "text-danger"
+                      : lastJob.status === "cancelled"
+                        ? "text-muted"
+                        : "text-muted"
+                  }`}
+                >
+                  Last:{" "}
+                  <span className="text-text">
+                    {lastJob.title?.trim() || shortId(lastJob.id)}
+                  </span>
+                  {formatDurationMs(lastJob.durationMs)
+                    ? ` · ${formatDurationMs(lastJob.durationMs)}`
+                    : ""}
+                  {` · ${lastJob.status}`}
+                </p>
+              ) : null}
             </div>
           )}
 
@@ -175,15 +318,90 @@ export function ComfyPanel({ comfy, comfyPort, className = "" }: ComfyPanelProps
             <div className="space-y-2">
               <div className="flex items-baseline justify-between gap-2 text-[10px] uppercase tracking-wide text-muted">
                 <span>Queue</span>
-                <span className="font-tabular normal-case text-muted">{pending} pending</span>
+                <span className="font-tabular normal-case text-muted">
+                  {pending} pending
+                  {etaLabel ? ` · ${etaLabel}` : ""}
+                </span>
               </div>
               {pendingJobs.slice(0, 2).map((job) => (
-                <JobBlock key={job.id} job={job} variant="pending" />
+                <JobBlock
+                  key={job.id}
+                  job={job}
+                  variant="pending"
+                  onCancel={() => void handleCancel(job.id)}
+                  cancelling={cancellingId === job.id}
+                />
               ))}
               {pending > Math.min(2, pendingJobs.length) ? (
                 <p className="text-[11px] text-muted">
                   +{pending - Math.min(2, pendingJobs.length)} more waiting
                 </p>
+              ) : null}
+            </div>
+          ) : null}
+
+          {active && lastJob ? (
+            <p className="text-[11px] text-muted">
+              Last: {lastJob.title?.trim() || shortId(lastJob.id)}
+              {formatDurationMs(lastJob.durationMs)
+                ? ` · ${formatDurationMs(lastJob.durationMs)}`
+                : ""}
+              {` · ${lastJob.status}`}
+            </p>
+          ) : null}
+
+          {modelsInstalled ? (
+            <div className="border-t border-border pt-2">
+              <button
+                type="button"
+                onClick={() => setModelsOpen((o) => !o)}
+                className="flex w-full items-center justify-between text-left text-[11px] text-muted hover:text-text"
+              >
+                <span>
+                  Installed: {modelsInstalled.checkpoints.length} checkpoints ·{" "}
+                  {modelsInstalled.loras.length} loras
+                </span>
+                <span className="text-[10px]">{modelsOpen ? "Hide" : "Show"}</span>
+              </button>
+              {modelsOpen ? (
+                <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wide text-muted">Checkpoints</div>
+                    {modelsInstalled.checkpoints.length === 0 ? (
+                      <p className="text-[11px] text-muted">None</p>
+                    ) : (
+                      <ul className="mt-0.5 space-y-0.5">
+                        {modelsInstalled.checkpoints.slice(0, 12).map((m) => (
+                          <li
+                            key={m}
+                            className="truncate font-tabular text-[11px] text-text"
+                            title={m}
+                          >
+                            {m}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                  <div>
+                    <div className="text-[10px] uppercase tracking-wide text-muted">LoRAs</div>
+                    {modelsInstalled.loras.length === 0 ? (
+                      <p className="text-[11px] text-muted">None</p>
+                    ) : (
+                      <ul className="mt-0.5 space-y-0.5">
+                        {modelsInstalled.loras.slice(0, 12).map((m) => (
+                          <li
+                            key={m}
+                            className="truncate font-tabular text-[11px] text-text"
+                            title={m}
+                          >
+                            {m}
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </div>
+                </div>
               ) : null}
             </div>
           ) : null}

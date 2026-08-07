@@ -112,6 +112,13 @@ export class SparkMonitor {
         this.comfyProbe = new ComfyProbe(spark, port);
       }
     } else {
+      if (this.comfyProbe) {
+        try {
+          this.comfyProbe.dispose();
+        } catch {
+          /* ignore */
+        }
+      }
       this.comfyProbe = null;
       this._metrics.comfy = null;
     }
@@ -222,6 +229,13 @@ export class SparkMonitor {
     this._llmIntervalId = null;
     this._comfyIntervalId = null;
     this._inflight = {};
+    if (this.comfyProbe) {
+      try {
+        this.comfyProbe.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
     console.log(`[SparkMonitor] ${this.spark.id} stopped`);
   }
 

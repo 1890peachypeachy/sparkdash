@@ -10,7 +10,15 @@ Format: version sections are listed newest first.
 ## [Unreleased]
 
 ### Added
-- **ComfyUI monitoring** — opt-in per Spark (`comfyMonitoring`, default port **8188**); Edit Spark checkbox + inline port; probe `/system_stats` + `/queue`; Spark page card shows **active/queued jobs** (workflow title, models, size/steps footprint) rather than host RAM/VRAM; connectivity Test includes ComfyUI when enabled
+- **ComfyUI monitoring** — opt-in per Spark (`comfyMonitoring`, default port **8188**); Edit Spark checkbox + inline port; probe `/system_stats` + `/queue`; job-centric Spark card
+- **ComfyUI live progress** — WebSocket when available, elapsed/avg estimate otherwise; progress bar on running job
+- **ComfyUI last job** — completed/failed/cancelled duration from `/api/jobs` (history fallback)
+- **ComfyUI cancel** — `POST /api/sparks/:id/comfy/cancel` to interrupt running or remove pending jobs
+- **ComfyUI Open link** — deep link to probe host:`port`
+- **Overview Comfy chip** — idle / run / Nq / offline when monitoring enabled
+- **ComfyUI model inventory** — checkpoints + loras from `/models/*`
+- **ComfyUI queue ETA** — estimate from recent job durations × pending (+ progress)
+- Collapsible **Resources** / **Services** sections; LLM+Comfy 2-column Services layout
 
 ### Changed
 - **Compact UI is the default** layout density (`density: "compact"`); comfortable remains available via Settings

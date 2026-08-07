@@ -9,6 +9,7 @@ import dotenv from "dotenv";
 import { SparkRegistry } from "./sparks/SparkRegistry.js";
 import { SparkMonitor } from "./sparks/SparkMonitor.js";
 import { sshExec, sshTest, llmTest, comfyTest } from "./collectors/ssh.js";
+import { comfyCancelJob } from "./collectors/comfyActions.js";
 import { validateSparkTarget, createRateLimiter } from "./validate.js";
 import { getSettings, updateSettings, loadSettings } from "./settings.js";
 import { broadcastForLanIp, effectiveMac, normalizeMac, sendWol } from "./wol.js";
@@ -331,6 +332,31 @@ app.post("/api/sparks/:id/test", async (req, res) => {
       ok: sshResult.ok || llmResult.ok || (comfyResult.ok && !comfyResult.skipped),
       hasPassword: registry.hasPassword(req.params.id),
     });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Cancel a ComfyUI job (running interrupt and/or pending dequeue).
+app.post("/api/sparks/:id/comfy/cancel", async (req, res) => {
+  if (!allowTest(clientKey(req))) {
+    return res.status(429).json({ error: "Too many requests; try again shortly" });
+  }
+  try {
+    const spark = registry.getSpark(req.params.id);
+    if (!spark) return res.status(404).json({ error: "Spark not found" });
+    if (!spark.comfyMonitoring) {
+      return res.status(400).json({ error: "ComfyUI monitoring is disabled for this Spark" });
+    }
+    const promptId = req.body?.promptId ?? req.body?.prompt_id;
+    if (!promptId || typeof promptId !== "string") {
+      return res.status(400).json({ error: "promptId is required" });
+    }
+    const result = await comfyCancelJob(spark, promptId, resolveComfyPort(spark));
+    // Nudge a comfy re-poll so UI updates quickly
+    const mon = monitors.get(req.params.id);
+    if (mon) void mon._pollDomain?.("comfy");
+    res.json({ success: result.ok, ...result });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

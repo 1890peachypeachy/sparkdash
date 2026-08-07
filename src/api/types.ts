@@ -261,6 +261,32 @@ export interface ComfyJob {
   createTime: number | null;
 }
 
+/** Live or estimated progress for the active Comfy job. */
+export interface ComfyProgress {
+  promptId: string | null;
+  nodeId: string | null;
+  nodeLabel: string | null;
+  value: number;
+  max: number;
+  percent: number | null;
+  updatedAt: number;
+  /** ws = Comfy WebSocket frames; estimate = elapsed/avg heuristic */
+  source?: "ws" | "estimate";
+}
+
+export interface ComfyLastJob {
+  id: string;
+  status: "completed" | "failed" | "cancelled" | string;
+  title: string | null;
+  durationMs: number | null;
+  endedAt: number | null;
+}
+
+export interface ComfyModelsInstalled {
+  checkpoints: string[];
+  loras: string[];
+}
+
 export interface ComfyMetrics {
   available: boolean;
   port: number;
@@ -274,6 +300,13 @@ export interface ComfyMetrics {
   activeJob?: ComfyJob | null;
   /** Next pending jobs (capped server-side). */
   pendingJobs?: ComfyJob[];
+  progress?: ComfyProgress | null;
+  lastJob?: ComfyLastJob | null;
+  modelsInstalled?: ComfyModelsInstalled | null;
+  /** Estimated ms until queue idle (running remainder + pending × avg). */
+  queueEtaMs?: number | null;
+  /** Browser-openable ComfyUI base URL (probe host + port). */
+  openUrl?: string | null;
   error: string | null;
 }
 
