@@ -7,6 +7,16 @@ Format: version sections are listed newest first.
 
 ---
 
+## [Unreleased]
+
+### Added
+- **ComfyUI monitoring** — opt-in per Spark (`comfyMonitoring`, default port **8188**); Edit Spark checkbox + inline port; probe `/system_stats` + `/queue`; Spark page card shows **active/queued jobs** (workflow title, models, size/steps footprint) rather than host RAM/VRAM; connectivity Test includes ComfyUI when enabled
+
+### Changed
+- **Compact UI is the default** layout density (`density: "compact"`); comfortable remains available via Settings
+
+---
+
 ## [1.5.0] — 2026-08-03
 
 ### Added
