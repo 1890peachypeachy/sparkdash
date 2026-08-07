@@ -147,13 +147,20 @@ export class ComfyProgressSocket {
   }
 
   setTarget(spark, port) {
+    const nextPort = Number(port);
     const hostChanged =
-      llmProbeHost(spark) !== llmProbeHost(this.spark) || Number(port) !== this.port;
+      llmProbeHost(spark) !== llmProbeHost(this.spark) ||
+      (Number.isInteger(nextPort) ? nextPort : this.port) !== this.port;
     this.spark = spark;
-    this.port = port;
-    if (hostChanged && this._ws) {
-      this.close();
-      if (this._wantOpen) this.open();
+    if (Number.isInteger(nextPort) && nextPort >= 1 && nextPort <= 65535) {
+      this.port = nextPort;
+    }
+    // Soft reconnect on host/port change — do not use close() (that sets
+    // _closed permanently and is reserved for dispose/stop).
+    if (hostChanged) {
+      const want = this._wantOpen;
+      this.disconnect();
+      if (want && !this._closed) this.open();
     }
   }
 
