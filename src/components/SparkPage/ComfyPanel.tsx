@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, type MouseEvent } from "react";
 import type { ComfyJob, ComfyMetrics, ComfyProgress } from "../../api/types";
 import { cancelComfyJob } from "../../api/client";
 import { Panel } from "../ui/Panel";
@@ -8,7 +8,35 @@ interface ComfyPanelProps {
   comfy: ComfyMetrics | null;
   comfyPort: number;
   sparkId: string;
+  /** Spark LAN IP — preferred host for the Open ComfyUI deep link. */
+  lanIp?: string | null;
   className?: string;
+}
+
+/** Browser URL for ComfyUI UI — always LAN IP when known (never dashboard origin). */
+function comfyOpenUrl(lanIp: string | null | undefined, comfyPort: number, serverOpenUrl?: string | null): string {
+  const port =
+    Number.isInteger(comfyPort) && comfyPort >= 1 && comfyPort <= 65535 ? comfyPort : 8188;
+  const lan = lanIp != null ? String(lanIp).trim() : "";
+  if (lan && lan !== "127.0.0.1" && lan !== "localhost") {
+    return `http://${lan}:${port}`;
+  }
+  // Prefer server-provided URL if it is absolute and not the dashboard path
+  if (serverOpenUrl && /^https?:\/\//i.test(serverOpenUrl)) {
+    try {
+      const u = new URL(serverOpenUrl);
+      if (u.port !== "5555" && !u.pathname.startsWith("/spark")) {
+        return serverOpenUrl;
+      }
+      // If server sent a loopback URL, still use host when non-local path
+      if (u.hostname !== "127.0.0.1" && u.hostname !== "localhost") {
+        return `http://${u.hostname}:${port}`;
+      }
+    } catch {
+      /* fall through */
+    }
+  }
+  return `http://127.0.0.1:${port}`;
 }
 
 function shortId(id: string): string {
@@ -182,7 +210,13 @@ function JobBlock({
   );
 }
 
-export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyPanelProps) {
+export function ComfyPanel({
+  comfy,
+  comfyPort,
+  sparkId,
+  lanIp,
+  className = "",
+}: ComfyPanelProps) {
   const available = Boolean(comfy?.available);
   const pending = comfy?.queuePending ?? 0;
   const active = comfy?.activeJob ?? null;
@@ -191,11 +225,21 @@ export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyP
   const lastJob = comfy?.lastJob ?? null;
   const modelsInstalled = comfy?.modelsInstalled ?? null;
   const etaLabel = formatEtaMs(comfy?.queueEtaMs ?? null);
-  const openUrl = comfy?.openUrl ?? `http://127.0.0.1:${comfyPort}`;
+  const openUrl = comfyOpenUrl(lanIp, comfyPort, comfy?.openUrl ?? null);
 
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [modelsOpen, setModelsOpen] = useState(false);
+
+  const handleOpenComfy = useCallback(
+    (e: MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      // Force a real top-level navigation off the sparkDash SPA origin.
+      window.open(openUrl, "_blank", "noopener,noreferrer");
+    },
+    [openUrl]
+  );
 
   const handleCancel = useCallback(
     async (promptId: string) => {
@@ -229,7 +273,8 @@ export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyP
             href={openUrl}
             target="_blank"
             rel="noopener noreferrer"
-            title={`Open ComfyUI (${openUrl}) — host must be reachable from your browser`}
+            onClick={handleOpenComfy}
+            title={`Open ComfyUI at ${openUrl} (must be reachable from your browser)`}
             className="inline-flex items-center gap-1 rounded border border-border px-1.5 py-0.5 text-[11px] text-muted transition-colors hover:border-accent hover:text-accent"
           >
             <ExternalLinkIcon className="h-3 w-3" />
@@ -350,7 +395,8 @@ export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyP
             </p>
           ) : null}
 
-          {modelsInstalled ? (
+          {modelsInstalled &&
+          (modelsInstalled.checkpoints.length > 0 || modelsInstalled.loras.length > 0) ? (
             <div className="border-t border-border pt-2">
               <button
                 type="button"
@@ -365,11 +411,11 @@ export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyP
               </button>
               {modelsOpen ? (
                 <div className="mt-1.5 grid gap-2 sm:grid-cols-2">
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wide text-muted">Checkpoints</div>
-                    {modelsInstalled.checkpoints.length === 0 ? (
-                      <p className="text-[11px] text-muted">None</p>
-                    ) : (
+                  {modelsInstalled.checkpoints.length > 0 ? (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-muted">
+                        Checkpoints
+                      </div>
                       <ul className="mt-0.5 space-y-0.5">
                         {modelsInstalled.checkpoints.slice(0, 12).map((m) => (
                           <li
@@ -381,13 +427,11 @@ export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyP
                           </li>
                         ))}
                       </ul>
-                    )}
-                  </div>
-                  <div>
-                    <div className="text-[10px] uppercase tracking-wide text-muted">LoRAs</div>
-                    {modelsInstalled.loras.length === 0 ? (
-                      <p className="text-[11px] text-muted">None</p>
-                    ) : (
+                    </div>
+                  ) : null}
+                  {modelsInstalled.loras.length > 0 ? (
+                    <div>
+                      <div className="text-[10px] uppercase tracking-wide text-muted">LoRAs</div>
                       <ul className="mt-0.5 space-y-0.5">
                         {modelsInstalled.loras.slice(0, 12).map((m) => (
                           <li
@@ -399,8 +443,8 @@ export function ComfyPanel({ comfy, comfyPort, sparkId, className = "" }: ComfyP
                           </li>
                         ))}
                       </ul>
-                    )}
-                  </div>
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
             </div>

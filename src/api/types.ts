@@ -331,6 +331,9 @@ export interface SparkSnapshot {
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;
+  /** LAN IP for browser deep-links (e.g. Open ComfyUI). */
+  lanIp?: string;
+  isLocal?: boolean;
   disabledDevices: string[];
   disabledInterfaces: string[];
   storagePollDisabled?: boolean;

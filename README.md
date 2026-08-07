@@ -46,10 +46,11 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
-### Version 1.5.0 — GPU thermal throttle meter
-- **Throttle signal** — NVIDIA `clocks_throttle_reasons` (thermal / HW / power cap) + SM clock headroom from `nvidia-smi` (local + remote)
-- **GPU panel** — Throttle chip (`OK` / `Thermal` / `Power` / `HW`) with SM clock bar and reason tooltip
-- **Overview** — red “Thermal throttle” hint when any Spark is thermally throttling
+### Version 1.6.0 — ComfyUI monitoring & compact default
+- **ComfyUI** — opt-in per Spark (port 8188): live jobs, progress, last run, cancel, queue ETA, Open on LAN IP, model inventory
+- **Overview** — Comfy status chip (`idle` / `run` / `Nq`)
+- **Layout** — collapsible Resources / Services; LLM + Comfy side-by-side; multi-LLM row rules
+- **Compact UI** — default density (comfortable still in Settings)
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -63,6 +64,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
 | **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live tok/s per server |
+| **ComfyUI** | Opt-in probe: queue/jobs, progress, cancel, Open link, inventory, overview chip |
 | **Decode benchmark** | Multi-concurrency streaming decode tok/s (server + per-stream), persisted last run |
 | **Prompt Showcase** | Full-page multi-terminal LLM streaming demo (up to 32 prompts) with live tok/s and copy-out |
 | **vLLM health** | KV cache %, run/wait queue, TTFT/E2E/ITL p95, preemptions, prefix cache, MTP accept from Prometheus `/metrics` |

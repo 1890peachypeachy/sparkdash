@@ -156,11 +156,22 @@ test("ComfyProbe parses running queue into activeJob + openUrl", async () => {
     assert.equal(snap.modelsInstalled?.checkpoints?.[0], "a.safetensors");
     assert.ok(snap.queueEtaMs > 0);
     assert.ok(snap.progress); // estimate while running
-    assert.equal(snap.openUrl, "http://127.0.0.1:8188");
+    // openUrl prefers LAN IP for browser deep links (not loopback probe host)
+    assert.equal(snap.openUrl, "http://127.0.0.1:8188"); // no lanIp on this spark
     probe.dispose();
     // Allow any in-flight WS handshake to settle without failing the suite
     await new Promise((r) => setTimeout(r, 30));
   } finally {
     globalThis.fetch = origFetch;
   }
+});
+
+test("openUrl prefers lanIp over localhost probe host", () => {
+  const probe = new ComfyProbe(
+    { isLocal: true, lanIp: "192.168.1.50", ssh: { host: "192.168.1.50" } },
+    8188
+  );
+  assert.equal(probe.openUrl(), "http://192.168.1.50:8188");
+  assert.match(probe.baseUrl, /127\.0\.0\.1:8188/); // probe still loopback when local
+  probe.dispose();
 });

@@ -260,8 +260,21 @@ export class ComfyProbe {
     this._progress.close();
   }
 
+  /**
+   * Browser deep-link host — always prefer LAN IP so "Open" works from other
+   * machines. Probe traffic still uses llmProbeHost (loopback when isLocal).
+   */
   openUrl() {
-    const host = llmProbeHost(this.spark);
+    const lan =
+      this.spark?.lanIp != null ? String(this.spark.lanIp).trim() : "";
+    const sshHost =
+      this.spark?.ssh?.host != null ? String(this.spark.ssh.host).trim() : "";
+    const host =
+      lan ||
+      (sshHost && sshHost !== "127.0.0.1" && sshHost !== "localhost"
+        ? sshHost
+        : "") ||
+      "127.0.0.1";
     return `http://${host}:${this.port}`;
   }
 
