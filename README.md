@@ -82,6 +82,64 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 
 ---
 
+## ComfyUI monitoring
+
+sparkDash can **optionally** monitor a [ComfyUI](https://github.com/comfyanonymous/ComfyUI) instance on each Spark — the same way it probes local LLMs, but focused on **jobs and queue**, not a second copy of GPU/RAM bars (those stay on the GPU / CPU panels).
+
+### What is supported
+
+| Capability | Details |
+|------------|---------|
+| **Opt-in per Spark** | `comfyMonitoring` (default **off**) + `comfyPort` (default **8188**) |
+| **Any role** | Head, worker, and standalone can enable ComfyUI independently of LLM cluster role |
+| **Liveness** | `GET /system_stats` — online, ComfyUI / PyTorch version, device type (cpu/cuda) |
+| **Queue / jobs** | `GET /queue` — running + pending items; workflow **title**, **model/LoRA** filenames from the graph, footprint (**resolution · steps · sampler · batch · node count**) |
+| **Progress** | Progress bar on the active job — Comfy WebSocket when events are available; otherwise elapsed / average-duration **estimate** |
+| **Last finished job** | Status + duration via `/api/jobs` (fallback `/history`) |
+| **Queue ETA** | Estimate from recent job durations × pending (+ progress remainder when known) |
+| **Cancel / remove** | From the Comfy card: interrupt a running job or dequeue a pending one (`POST /api/sparks/:id/comfy/cancel`) |
+| **Open ComfyUI** | One-click link to `http://{lanIp}:{comfyPort}` (LAN IP preferred so remote browsers do not hit localhost) |
+| **Model inventory** | Checkpoints + LoRAs from `/models/*` (UI section only when at least one file is listed) |
+| **Overview chip** | When monitoring is on: `Comfy · idle` / `run` / `Nq` / muted if unreachable |
+| **Layout** | Under **Services**: primary LLM + Comfy side-by-side when both are enabled; collapsible **Resources** / **Services** sections |
+
+**Not claimed:** true per-job VRAM (Comfy does not expose that cleanly over HTTP). Host GPU/VRAM remains on the GPU panel. Live step progress depends on Comfy broadcasting WS events; stock Comfy often scopes detailed progress to the client that submitted the prompt.
+
+### How to enable (per Spark)
+
+1. Open the Spark tab → **Edit** (pencil).
+2. Enable **ComfyUI monitoring**.
+3. Set **port** if needed (default **8188**).
+4. **Save**.
+
+The Spark page **Services** section shows the ComfyUI card. On Overview, a small Comfy chip appears for that unit.
+
+**Connectivity Test** (in Edit) includes ComfyUI when monitoring is enabled.
+
+### ComfyUI side requirements
+
+- ComfyUI must be reachable from the **sparkDash server** on the probe host:
+  - **Local Spark** (`isLocal`): sparkDash probes `127.0.0.1:{port}` (use Docker `network_mode: host` if the dashboard runs in a container).
+  - **Remote Spark**: probe uses the Spark **LAN IP** (same as LLM probes).
+- For **Open** from another machine’s browser, Comfy should listen on a reachable interface (e.g. `--listen 0.0.0.0`), not only loopback, and the Spark’s **LAN IP** must be set correctly in Edit.
+
+### Config fields (persisted on the Spark)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `comfyMonitoring` | `false` | Probe ComfyUI and show the card / overview chip |
+| `comfyPort` | `8188` | ComfyUI HTTP port |
+
+### Related API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/sparks/:id/comfy/cancel` | Cancel a job (`{ "promptId": "<uuid>" }`) — interrupt running and/or remove from queue |
+
+Env (optional): `COMFY_PORT` (default `8188`), `COMFY_PROBE_TIMEOUT_MS`, `POLL_INTERVAL_COMFY`.
+
+---
+
 ## Quick start
 
 ```bash
@@ -185,8 +243,9 @@ sparkDash/
 | DELETE | `/api/sparks/:id` | Remove Spark and drain monitor |
 | PUT | `/api/sparks/order` | Persist tab order |
 | GET | `/api/sparks/:id/metrics` | One-shot metrics snapshot |
-| POST | `/api/sparks/test` | Ephemeral SSH + LLM test (no persist) |
+| POST | `/api/sparks/test` | Ephemeral SSH + LLM (+ Comfy if enabled) test (no persist) |
 | POST | `/api/sparks/:id/test` | Connectivity test (can save password) |
+| POST | `/api/sparks/:id/comfy/cancel` | Cancel ComfyUI job by `promptId` |
 | PUT | `/api/sparks/:id/password` | Save SSH password (works offline) |
 | PUT | `/api/sparks/:id/disabled-devices` | Hide storage devices (hot) |
 | PUT | `/api/sparks/:id/disabled-interfaces` | Hide network interfaces (hot) |
@@ -224,7 +283,9 @@ Copy `.env.example` to `.env` if needed:
 | `BIND_HOST` | `0.0.0.0` | HTTP and WebSocket listen address |
 | `PORT` | `5555` | HTTP + WebSocket listen port |
 | `LLM_PORT` | `8888` | Default LLM probe port |
+| `COMFY_PORT` | `8188` | Default ComfyUI probe port |
 | `POLL_INTERVAL_GPU` | `2000` | GPU poll (ms) |
+| `POLL_INTERVAL_COMFY` | `2000` | ComfyUI probe poll (ms) |
 | `POLL_INTERVAL_CPU` | `2000` | CPU / RAM poll (ms) |
 | `POLL_INTERVAL_NETWORK` | `2000` | Network poll (ms) |
 | `POLL_INTERVAL_STORAGE` | `5000` | Storage poll (ms) |
