@@ -29,6 +29,7 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 - [Latest version changelog](#latest-version-changelog)
 - [Features](#features)
+- [ComfyUI monitoring](#comfyui-monitoring)
 - [Full changelog](./CHANGELOG.md)
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
