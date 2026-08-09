@@ -6,6 +6,7 @@ import { SparkTabs } from "./components/SparkTabs";
 import { AddSparkDialog } from "./components/AddSparkDialog";
 import { EditSparkDialog } from "./components/EditSparkDialog";
 import { SparkPage } from "./components/SparkPage/SparkPage";
+import { HermesUpdateDialog } from "./components/SparkPage/HermesUpdateDialog";
 import { OverviewPage } from "./components/OverviewPage/OverviewPage";
 import { ShowcasePage } from "./components/ShowcasePage/ShowcasePage";
 import { ThemeSwitch } from "./components/ThemeSwitch";
@@ -60,6 +61,18 @@ function placeholderSnapshot(
           : roleFields?.llmMonitoring !== false,
     comfyMonitoring: Boolean(roleFields?.comfyMonitoring),
     comfyPort: roleFields?.comfyPort ?? 8188,
+    hermes: {
+      monitoring: false,
+      installed: null,
+      version: null,
+      updateAvailable: null,
+      behindCommits: null,
+      checkedAt: null,
+      status: "idle",
+      startedAt: null,
+      finishedAt: null,
+      error: null,
+    },
     hardware: {
       device: "NVIDIA DGX Spark",
       cpuModel: "…",
@@ -118,6 +131,7 @@ function DashboardApp() {
     const live = liveSparks.map((s) => s.id).join("\0");
     if (live === orderOverride.join("\0")) setOrderOverride(null);
   }, [liveSparks, orderOverride]);
+
 
   const isOverview = activeId === OVERVIEW_ID;
   const displayActive = isOverview
@@ -272,6 +286,7 @@ function DashboardApp() {
           )}
         </main>
       </div>
+      <HermesUpdateDialog />
       <AddSparkDialog
         open={showAdd}
         onClose={() => setShowAdd(false)}

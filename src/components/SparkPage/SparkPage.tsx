@@ -4,7 +4,6 @@ import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { updateSpark, refreshSparkMetric, addLlmPort, removeLlmPort } from "../../api/client";
 import { SparkHeader } from "./SparkHeader";
 import { GpuPanel } from "./GpuPanel";
-import { CpuPanel } from "./CpuPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { LlmPanel } from "./LlmPanel";
@@ -220,12 +219,12 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
         />
         {resourcesOpen && (
           <>
-            <GpuPanel gpu={metrics.gpu} sparkId={spark.id} temperatureUnit={temperatureUnit} />
-            <CpuPanel
-              cpu={metrics.cpu}
-              ram={metrics.ram}
+            {/* Resources layout: GPU spans the full left column; Storage + Network stack in the right column */}
+            <GpuPanel
+              gpu={metrics.gpu}
               sparkId={spark.id}
-              unifiedMemory={metrics.unifiedMemory}
+              temperatureUnit={temperatureUnit}
+              className="md:row-span-2"
             />
             <StoragePanel
               storage={metrics.storage}

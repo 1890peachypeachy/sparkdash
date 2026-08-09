@@ -249,6 +249,7 @@ export function EditSparkDialog({
           const n = Number(config.comfyPort);
           return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 8188;
         })(),
+        hermesMonitoring: Boolean(config.hermesMonitoring),
         ssh: {
           host: config.ssh.host || config.lanIp,
           user: config.ssh.user,
@@ -462,6 +463,28 @@ export function EditSparkDialog({
                   />
                 </div>
               </div>
+
+              <label className="flex items-center gap-2 text-xs text-muted">
+                <input
+                  type="checkbox"
+                  checked={Boolean(config.hermesMonitoring)}
+                  onChange={(e) => update({ hermesMonitoring: e.target.checked })}
+                  className="rounded border-border"
+                />
+                <span>Hermes Agent</span>
+                <span
+                  className="inline-flex shrink-0 cursor-help text-muted hover:text-text"
+                  title='Hermes Agent CLI is installed on this machine (nousresearch/hermes-agent). When enabled, sparkDash checks for updates (hermes update --check) and can run “hermes update” for you via SSH with one click.'
+                  aria-label='Hermes Agent CLI is installed on this machine; enable update monitoring and one-click updates.'
+                >
+                  <InfoIcon className="h-3.5 w-3.5" />
+                </span>
+              </label>
+              <p className="mt-1 text-[10px] text-muted">
+                Toasts when a Hermes update is available and adds a one-click update (runs{" "}
+                <code className="rounded bg-surface-elevated px-1">hermes update</code> on this
+                machine).
+              </p>
 
               {role === "worker" && (
                 <div className="space-y-3">

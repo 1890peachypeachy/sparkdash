@@ -9,6 +9,7 @@ interface GpuPanelProps {
   gpu: GpuMetrics | null;
   sparkId: string;
   temperatureUnit: "celsius" | "fahrenheit";
+  className?: string;
 }
 
 function celsiusToFahrenheit(c: number): number {
@@ -42,7 +43,7 @@ function MetricRow({
   );
 }
 
-export function GpuPanel({ gpu, sparkId, temperatureUnit }: GpuPanelProps) {
+export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelProps) {
   const tempHistory = useMetricsHistoryTail(sparkId, "gpu.temp");
   const usageHistory = useMetricsHistoryTail(sparkId, "gpu.usage");
 
@@ -69,7 +70,7 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit }: GpuPanelProps) {
       title="GPU"
       accent
       icon={<ActivityIcon />}
-      className="panel-gpu"
+      className={`panel-gpu ${className ?? ""}`}
       bodyClassName="space-y-3"
     >
       <MetricRow

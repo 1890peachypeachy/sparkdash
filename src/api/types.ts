@@ -65,11 +65,90 @@ export interface SparkConfig {
   comfyMonitoring?: boolean;
   /** ComfyUI HTTP port (default 8188). */
   comfyPort?: number;
+  /**
+   * Opt-in: Hermes Agent CLI (nousresearch/hermes-agent) is installed on this
+   * machine. When enabled, sparkDash checks for Hermes updates and can run
+   * `hermes update` for you via SSH.
+   */
+  hermesMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
 }
 
 export type SparkRole = "head" | "worker" | "standalone";
+
+// ─── Hermes Agent status ───────────────────────────────
+/** Opt-in Hermes Agent update monitoring state, pushed in every snapshot. */
+export interface HermesStatus {
+  /** Opt-in setting from Edit Spark (hermes installed on this machine). */
+  monitoring: boolean;
+  /** Whether the `hermes` binary was found on the target. null before first check. */
+  installed: boolean | null;
+  /** Installed version string when detected (e.g. "0.20.0"). */
+  version: string | null;
+  /** true when `hermes update --check` reports commits behind origin/main. */
+  updateAvailable: boolean | null;
+  /** Number of commits behind origin/main when reported. */
+  behindCommits: number | null;
+  /** Last check time (ms epoch). */
+  checkedAt: number | null;
+  /** One-shot update job state. */
+  status: "idle" | "running" | "success" | "error";
+  startedAt: number | null;
+  finishedAt: number | null;
+  /** Short human-readable message when the last check/update failed. */
+  error: string | null;
+}
+
+/** Latest public Hermes Agent release (changelog for the update dialog). */
+export interface HermesRelease {
+  /** GitHub release tag, e.g. "v2026.7.7.2". */
+  tagName: string;
+  /** Human release name, e.g. "Hermes Agent v0.18.1 (v2026.7.7.2)". */
+  name: string;
+  version: string;
+  /** Semantic version of the release (e.g. "0.20.0") for bump detection. */
+  semver: string | null;
+  publishedAt: string | null;
+  htmlUrl: string;
+  /** Markdown release body. */
+  body: string;
+}
+
+/** One pending commit an update would bring (from git HEAD..origin/main). */
+export interface HermesPendingCommit {
+  sha: string;
+  title: string;
+}
+
+/** One Spark's outcome from a batch `update-all` call. */
+export interface HermesBatchUpdateResult {
+  id: string;
+  name: string;
+  ok: boolean;
+  started: boolean;
+  skipped?: boolean;
+  reason?: string;
+}
+
+export interface HermesBatchUpdateResponse {
+  success: boolean;
+  results: HermesBatchUpdateResult[];
+}
+
+/** Per-Spark update preview used by the confirmation dialog. */
+export interface HermesUpdatesResponse {
+  success: boolean;
+  /** Which content the dialog should lead with. */
+  view: "commits" | "release";
+  /** Latest tagged release (may be null on GitHub API failure). */
+  release: HermesRelease | null;
+  releaseError: string | null;
+  /** Installed hermes version on this Spark (e.g. "0.20.0"), when known. */
+  installedVersion: string | null;
+  /** Pending commits from git (may be null if the repo can't be read). */
+  pending: { count: number; headSha: string | null; commits: HermesPendingCommit[] } | null;
+}
 
 // ─── Hardware info ───────────────────────────────────────
 export interface HardwareInfo {
@@ -357,6 +436,8 @@ export interface SparkSnapshot {
   comfyMonitoring?: boolean;
   /** ComfyUI HTTP port (default 8188) */
   comfyPort?: number;
+  /** Hermes Agent update monitoring state (present in every snapshot). */
+  hermes?: HermesStatus;
   hardware: HardwareInfo;
   metrics: SparkMetrics;
 }

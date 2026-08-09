@@ -3,7 +3,8 @@ import type { SparkSnapshot } from "../../api/types";
 import { resolveSparkRole } from "../../api/sparkRole";
 import { shutdownSpark, wakeSpark } from "../../api/client";
 import { ConfirmShutdownDialog } from "../ConfirmShutdownDialog";
-import { EditIcon, PowerOffIcon, PowerOnIcon } from "../ui/icons";
+import { openHermesUpdateDialog } from "../../hooks/useHermesUpdateDialog";
+import { EditIcon, PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 
 interface SparkHeaderProps {
   spark: SparkSnapshot;
@@ -28,6 +29,17 @@ export function SparkHeader({ spark, onEdit }: SparkHeaderProps) {
   const [powerLoading, setPowerLoading] = useState(false);
   const [powerMsg, setPowerMsg] = useState<{ text: string; tone: "ok" | "err" } | null>(null);
   const [shutdownOpen, setShutdownOpen] = useState(false);
+
+  const hermes = spark.hermes;
+  const hermesRunning = hermes?.status === "running";
+
+  function handleHermesUpdate() {
+    openHermesUpdateDialog({
+      sparkId: spark.id,
+      sparkName: spark.name,
+      currentVersion: hermes?.version ?? null,
+    });
+  }
 
   async function handleShutdown() {
     setPowerLoading(true);
@@ -117,6 +129,32 @@ export function SparkHeader({ spark, onEdit }: SparkHeaderProps) {
                 {formatUptime(spark.uptime)}
               </span>
             )}
+            {hermes?.monitoring && hermes.installed && hermes.version && (
+              <span
+                className="shrink-0 rounded bg-accent/15 px-1.5 py-0.5 font-tabular text-[10px] font-medium text-accent"
+                title={`Hermes Agent ${hermes.version} installed on this machine`}
+              >
+                Hermes v{hermes.version}
+              </span>
+            )}
+            {hermes?.monitoring && hermes.installed === false && hermes.checkedAt != null && (
+              <span
+                className="shrink-0 rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-medium text-danger"
+                title="The `hermes` binary was not found on this machine (check the install path or Edit Spark)."
+              >
+                Hermes not found
+              </span>
+            )}
+            {hermes?.monitoring &&
+              hermes.error &&
+              hermes.status === "idle" && (
+                <span
+                  className="max-w-[16rem] shrink-0 truncate rounded bg-danger/15 px-1.5 py-0.5 text-[10px] font-medium text-danger"
+                  title={`Update check failed — it will retry automatically: ${hermes.error}`}
+                >
+                  Update check failed
+                </span>
+              )}
           </div>
           <p className="truncate text-xs text-muted">
             {hardware.device} · {hardware.gpuChip}
@@ -129,6 +167,57 @@ export function SparkHeader({ spark, onEdit }: SparkHeaderProps) {
           <span className={`text-[11px] ${powerMsg.tone === "ok" ? "text-success" : "text-danger"}`}>
             {powerMsg.text}
           </span>
+        )}
+        {hermesRunning && (
+          <span
+            className="flex items-center gap-1.5 text-[11px] text-warning"
+            title="Running `hermes update` on this machine via SSH — this can take a few minutes."
+          >
+            <RotateIcon className="h-3 w-3" />
+            Hermes updating…
+          </span>
+        )}
+        {!hermesRunning && hermes?.monitoring && hermes.status === "error" && (
+          <span
+            className="max-w-[16rem] truncate text-[11px] text-danger"
+            title={hermes.error || "Hermes update failed"}
+          >
+            Hermes update failed
+          </span>
+        )}
+        {!hermesRunning && hermes?.monitoring && hermes.installed !== false && (
+          <button
+            type="button"
+            onClick={() => void handleHermesUpdate()}
+            disabled={powerLoading}
+            title={
+              hermes.updateAvailable === true
+                ? `Run "hermes update" on this machine via SSH${
+                    hermes.behindCommits ? ` (${hermes.behindCommits} commits behind)` : ""
+                  }`
+                : "Open Hermes Agent update status and run updates on this machine via SSH"
+            }
+            className={`flex items-center gap-1.5 rounded-md border bg-surface-elevated px-3 py-1.5 text-[11px] transition-colors disabled:opacity-50 ${
+              hermes.updateAvailable === true
+                ? "border-warning/40 text-warning hover:bg-warning/15"
+                : "border-border text-muted hover:bg-surface-hover hover:text-text"
+            }`}
+          >
+            <RotateIcon className="h-3 w-3" />
+            Update Hermes
+            {hermes.updateAvailable === true && (
+              <span
+                className="ml-0.5 flex h-4 min-w-4 items-center justify-center rounded-full bg-warning px-1 text-[9px] font-bold leading-none text-white"
+                title={
+                  hermes.behindCommits != null
+                    ? `${hermes.behindCommits} commit${hermes.behindCommits === 1 ? "" : "s"} behind`
+                    : "Update available"
+                }
+              >
+                {hermes.behindCommits != null ? hermes.behindCommits : "!"}
+              </span>
+            )}
+          </button>
         )}
         {online ? (
           <button

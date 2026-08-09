@@ -511,6 +511,11 @@ export class SparkRegistry {
       comfyMonitoring: Boolean(config.comfyMonitoring),
       /** ComfyUI HTTP port (default 8188). */
       comfyPort: this._normalizeComfyPort(config.comfyPort),
+      /**
+       * Opt-in: Hermes Agent CLI is installed on this machine. When enabled,
+       * the SparkMonitor checks for updates and allows one-click `hermes update`.
+       */
+      hermesMonitoring: Boolean(config.hermesMonitoring),
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),

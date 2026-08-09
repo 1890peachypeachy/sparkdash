@@ -32,6 +32,14 @@ const POLL_INTERVAL_COMFY = parseInt(process.env.POLL_INTERVAL_COMFY || "2000", 
 const POLL_INTERVAL_BANDWIDTH = parseInt(process.env.POLL_INTERVAL_BANDWIDTH || "2000", 10);
 // Dedicated liveness (sshTest / local ping) cadence — not a metric domain.
 const POLL_INTERVAL_LIVENESS = parseInt(process.env.POLL_INTERVAL_LIVENESS || "5000", 10);
+// Hermes Agent update check cadence. `hermes update --check` runs `git fetch`
+// on the target every time, so keep it slow (default 10 min).
+const POLL_INTERVAL_HERMES = parseInt(process.env.POLL_INTERVAL_HERMES || "600000", 10);
+// Hard cap while running `hermes update` over SSH (repo pull + dep reinstall).
+const HERMES_UPDATE_TIMEOUT_MS = parseInt(
+  process.env.HERMES_UPDATE_TIMEOUT_MS || "600000",
+  10
+);
 
 // ─── Port ────────────────────────────────────────────────
 const PORT = parseInt(process.env.PORT || "5555", 10);
@@ -91,6 +99,8 @@ export {
   POLL_INTERVAL_COMFY,
   POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
+  POLL_INTERVAL_HERMES,
+  HERMES_UPDATE_TIMEOUT_MS,
   PORT,
   LLM_PORT,
   COMFY_PORT,
