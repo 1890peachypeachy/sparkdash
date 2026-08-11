@@ -24,6 +24,9 @@ const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "../..");
 const HISTORY_PATH =
   process.env.BENCH_HISTORY_PATH || path.join(ROOT, "config", "bench-history.json");
+/** In-flight jobs checkpointed here so a --watch / SIGTERM restart does not 404 polls. */
+const ACTIVE_PATH =
+  process.env.BENCH_ACTIVE_PATH || path.join(ROOT, "config", "bench-active.json");
 
 /**
  * Structured generation prompts (JSON / HTML). Models usually sustain higher
@@ -369,9 +372,13 @@ async function runConcurrencyWave({
 /**
  * Job manager: one active job per spark, short history persisted to disk
  * so last results survive page refresh and process restart.
+ *
+ * Running jobs are also checkpointed to bench-active.json. On boot (or
+ * graceful shutdown), any leftover "running" entries are finalized as
+ * interrupted so GET /bench/:id keeps working instead of returning 404.
  */
 export class DecodeBenchManager {
-  constructor(historyPath = HISTORY_PATH) {
+  constructor(historyPath = HISTORY_PATH, activePath = ACTIVE_PATH) {
     /** @type {Map<string, object>} */
     this.jobs = new Map();
     /** @type {Map<string, string>} sparkId → active benchId */
@@ -379,7 +386,9 @@ export class DecodeBenchManager {
     /** @type {Map<string, object[]>} */
     this.historyBySpark = new Map();
     this.historyPath = historyPath;
+    this.activePath = activePath;
     this._loadHistory();
+    this._recoverInterruptedActive();
   }
 
   getJob(benchId) {
@@ -485,6 +494,112 @@ export class DecodeBenchManager {
     }
   }
 
+  /**
+   * Promote leftover active checkpoints (process died mid-run) into history
+   * so clients polling GET /:benchId still get a final job instead of 404.
+   */
+  _recoverInterruptedActive() {
+    const leftovers = this._readActiveFile();
+    if (!leftovers.length) return;
+
+    let changed = false;
+    for (const snap of leftovers) {
+      if (!snap?.benchId || !snap?.sparkId) continue;
+      // Already in history from a prior clean finalize — skip
+      const hist = this.getHistory(snap.sparkId);
+      if (hist.some((j) => j.benchId === snap.benchId)) continue;
+
+      const interrupted = {
+        ...snap,
+        status: "failed",
+        error:
+          snap.error ||
+          "Interrupted — server restarted while the benchmark was running",
+        completedAt: snap.completedAt || Date.now(),
+        progress: {
+          ...(snap.progress || {}),
+          message: "Interrupted",
+          currentConcurrency: null,
+        },
+      };
+      if (interrupted.completedAt && interrupted.startedAt) {
+        interrupted.durationMs = interrupted.completedAt - interrupted.startedAt;
+      }
+      this.jobs.set(interrupted.benchId, interrupted);
+      this._pushHistory(interrupted);
+      changed = true;
+      console.warn(
+        `[DecodeBench] recovered interrupted job ${interrupted.benchId} on ${interrupted.sparkId}`
+      );
+    }
+
+    // Clear active file either way — nothing is actually running after boot
+    this._writeActiveFile([]);
+    if (changed) this._saveHistory();
+  }
+
+  _readActiveFile() {
+    try {
+      if (!fs.existsSync(this.activePath)) return [];
+      const raw = fs.readFileSync(this.activePath, "utf8");
+      const data = JSON.parse(raw);
+      if (Array.isArray(data)) return data;
+      if (data && typeof data === "object" && Array.isArray(data.jobs)) {
+        return data.jobs;
+      }
+      return [];
+    } catch (err) {
+      console.warn("[DecodeBench] failed to load active jobs:", err?.message || err);
+      return [];
+    }
+  }
+
+  _writeActiveFile(jobs) {
+    try {
+      atomicWrite(
+        this.activePath,
+        JSON.stringify({ jobs }, null, 2),
+        0o600
+      );
+    } catch (err) {
+      console.warn("[DecodeBench] failed to save active jobs:", err?.message || err);
+    }
+  }
+
+  /** Persist public snapshots of all currently running jobs. */
+  _checkpointActive() {
+    /** @type {object[]} */
+    const running = [];
+    for (const job of this.jobs.values()) {
+      if (job.status === "running") running.push(publicJob(job));
+    }
+    this._writeActiveFile(running);
+  }
+
+  /**
+   * Finalize every running job (used on SIGTERM / --watch reload).
+   * Aborts in-flight streams and writes history so polls do not 404.
+   * @param {string} [reason]
+   */
+  interruptAll(reason = "Interrupted — server shutting down") {
+    for (const job of this.jobs.values()) {
+      if (job.status !== "running") continue;
+      try {
+        job._abort?.abort();
+      } catch {
+        /* ignore */
+      }
+      job.status = "failed";
+      job.error = reason;
+      job.progress.message = "Interrupted";
+      job.progress.currentConcurrency = null;
+      job.completedAt = Date.now();
+      this.activeBySpark.delete(job.sparkId);
+      this._pushHistory(job);
+    }
+    this._writeActiveFile([]);
+  }
+
   _saveHistory() {
     try {
       /** @type {Record<string, object[]>} */
@@ -586,6 +701,7 @@ export class DecodeBenchManager {
 
     this.jobs.set(benchId, job);
     this.activeBySpark.set(sparkId, benchId);
+    this._checkpointActive();
 
     // Fire and forget — client polls GET
     this._runJob(job, lanIp).catch(() => {
@@ -611,14 +727,17 @@ export class DecodeBenchManager {
     try {
       for (const c of job.config.concurrencies) {
         if (job._abort.signal.aborted) {
-          job.status = "cancelled";
-          job.error = "Cancelled by user";
-          job.progress.message = "Cancelled";
+          if (job.status === "running") {
+            job.status = "cancelled";
+            job.error = "Cancelled by user";
+            job.progress.message = "Cancelled";
+          }
           break;
         }
 
         job.progress.currentConcurrency = c;
         job.progress.message = `Running concurrency ${c}…`;
+        this._checkpointActive();
 
         const wave = await runConcurrencyWave({
           baseUrl,
@@ -637,9 +756,11 @@ export class DecodeBenchManager {
             job.results.push(wave);
             job.progress.completedLevels += 1;
           }
-          job.status = "cancelled";
-          job.error = "Cancelled by user";
-          job.progress.message = "Cancelled";
+          if (job.status === "running") {
+            job.status = "cancelled";
+            job.error = "Cancelled by user";
+            job.progress.message = "Cancelled";
+          }
           break;
         }
 
@@ -649,6 +770,7 @@ export class DecodeBenchManager {
 
         job.results.push(wave);
         job.progress.completedLevels += 1;
+        this._checkpointActive();
       }
 
       if (job.status === "running") {
@@ -657,25 +779,31 @@ export class DecodeBenchManager {
         job.progress.message = "Done";
       }
     } catch (err) {
-      if (job._abort.signal.aborted) {
-        job.status = "cancelled";
-        job.error = "Cancelled by user";
-        job.progress.message = "Cancelled";
-      } else {
-        job.status = "failed";
-        job.error = err?.message || String(err);
-        job.progress.message = "Failed";
+      if (job.status === "running") {
+        if (job._abort.signal.aborted) {
+          job.status = "cancelled";
+          job.error = "Cancelled by user";
+          job.progress.message = "Cancelled";
+        } else {
+          job.status = "failed";
+          job.error = err?.message || String(err);
+          job.progress.message = "Failed";
+        }
       }
     } finally {
-      job.completedAt = Date.now();
+      if (job.completedAt == null) job.completedAt = Date.now();
       this.activeBySpark.delete(job.sparkId);
       this._pushHistory(job);
+      this._checkpointActive();
     }
   }
 
   _pushHistory(job) {
     const list = this.historyBySpark.get(job.sparkId) || [];
-    list.unshift(publicJob(job));
+    const pub = publicJob(job);
+    const existing = list.findIndex((j) => j.benchId === pub.benchId);
+    if (existing >= 0) list.splice(existing, 1);
+    list.unshift(pub);
     this.historyBySpark.set(job.sparkId, list.slice(0, HISTORY_LIMIT));
     this._saveHistory();
   }

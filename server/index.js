@@ -1358,6 +1358,15 @@ function shutdown(signal) {
   _shuttingDown = true;
   console.log(`[sparkDash] ${signal} received, shutting down…`);
   try {
+    // Finalize in-flight benches before the process dies so clients polling
+    // GET /llm/bench/:id do not hit "Benchmark not found" after --watch reload.
+    decodeBenchManager.interruptAll(
+      "Interrupted — server restarted while the benchmark was running"
+    );
+  } catch (err) {
+    console.error("[sparkDash] failed to finalize benchmarks:", err.message);
+  }
+  try {
     if (broadcastTimer) {
       clearInterval(broadcastTimer);
       broadcastTimer = null;

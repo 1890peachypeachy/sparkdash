@@ -185,15 +185,52 @@ export function BenchmarkDialog({
         void getDecodeBench(sparkId, benchId)
           .then((j) => {
             setJob(j);
+            setError(null);
             if (j.status !== "running") stopPoll();
           })
           .catch((err: Error) => {
-            setError(err.message);
-            stopPoll();
+            // Server --watch / restart can drop the in-memory job for a moment.
+            // Recover via list, or show a clear interrupt message instead of a bare 404.
+            void listDecodeBench(sparkId, llmPort)
+              .then((data) => {
+                if (data.active) {
+                  setJob(data.active);
+                  setError(null);
+                  if (data.active.benchId !== benchId) {
+                    startPolling(data.active.benchId);
+                  } else if (data.active.status !== "running") {
+                    stopPoll();
+                  }
+                  return;
+                }
+                const finished =
+                  data.history?.find((j) => j.benchId === benchId) ||
+                  (data.last?.benchId === benchId ? data.last : null);
+                if (finished) {
+                  setJob(finished);
+                  setError(null);
+                  stopPoll();
+                  return;
+                }
+                setError(
+                  err.message === "Benchmark not found"
+                    ? "Benchmark interrupted — server restarted during the run"
+                    : err.message
+                );
+                stopPoll();
+              })
+              .catch(() => {
+                setError(
+                  err.message === "Benchmark not found"
+                    ? "Benchmark interrupted — server restarted during the run"
+                    : err.message
+                );
+                stopPoll();
+              });
           });
       }, 800);
     },
-    [sparkId, stopPoll]
+    [sparkId, llmPort, stopPoll]
   );
 
   useEffect(() => {
