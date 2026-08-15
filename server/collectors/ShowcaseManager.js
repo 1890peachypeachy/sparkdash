@@ -17,7 +17,9 @@ import {
   pollServerGenerationRates,
   round2,
   runStreamingRequest,
+  stripFillForceFields,
 } from "./LlmStreaming.js";
+import { withFillToMaxInstruction } from "../../src/shared/llmPrompts.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -40,7 +42,7 @@ const MIN_PROMPT_LEN = 1;
 const MAX_PROMPT_LEN = 4000;
 const HEARTBEAT_TIMEOUT_MS = 5_000;
 const HEARTBEAT_CHECK_MS = 1_000;
-/** Full max_tokens fills at low tok/s need a longer per-stream budget than decode bench. */
+/** Full max_tokens fills at low tok/s need a long per-stream budget. */
 const PER_REQUEST_TIMEOUT_MS = 360_000;
 const LABEL_CHARS = 40;
 
@@ -55,38 +57,8 @@ function contentCap(maxTokens) {
 
 const PROMPT_TYPES = new Set(["structural", "text", "mixed"]);
 
-/** Suffix appended server-side; keep under MAX_PROMPT_LEN headroom in UI catalogs. */
-const FILL_TO_MAX_SUFFIX =
-  " Continue generating until you hit the maximum output length; do not stop early—keep expanding with more content.";
-
-/**
- * Encourage full-length completions when the prompt doesn't already ask for it.
- * Only skip when the prompt already states the hard length/EOS rule — phrases like
- * "keep expanding" alone are not enough (models still stop at natural EOS).
- * @param {string} prompt
- */
-export function withFillToMaxInstruction(prompt) {
-  const p = String(prompt || "").trim();
-  if (!p) return p;
-  if (
-    /maximum output length|do not stop early|until you hit the (maximum|output)/i.test(
-      p
-    )
-  ) {
-    return p;
-  }
-  return `${p}${FILL_TO_MAX_SUFFIX}`;
-}
-
-/** vLLM-oriented fields that some OpenAI-compat servers reject with HTTP 400. */
-export function stripFillForceFields(body) {
-  if (!body || typeof body !== "object") return body;
-  const next = { ...body };
-  delete next.min_tokens;
-  delete next.ignore_eos;
-  delete next.stop;
-  return next;
-}
+export { withFillToMaxInstruction } from "../../src/shared/llmPrompts.js";
+export { stripFillForceFields } from "./LlmStreaming.js";
 
 function labelFromPrompt(prompt) {
   const s = String(prompt || "").replace(/\s+/g, " ").trim();

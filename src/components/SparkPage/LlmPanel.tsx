@@ -156,6 +156,7 @@ export function LlmPanel({
 }: LlmPanelProps) {
   // Tail keyed by port so multi-port LLM sparklines stay distinct (8b).
   const genHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.tps`);
+  const prefillHistory = useMetricsHistoryTail(sparkId, `llm:${llmPort}.prefill`);
   const [showSettings, setShowSettings] = useState(false);
   const [portDraft, setPortDraft] = useState(String(llmPort));
   const [apiKeyDraft, setApiKeyDraft] = useState("");
@@ -181,6 +182,7 @@ export function LlmPanel({
   }, [clearEngineInfoTimer]);
 
   const generationTps = llm?.generationTps ?? 0;
+  const prefillTps = llm?.prefillTps ?? 0;
   const available = llm?.available ?? false;
 
   // Keep draft in sync when server pushes a different port (other tab / reload)
@@ -445,6 +447,18 @@ export function LlmPanel({
               <Sparkline data={genHistory} color="var(--color-accent)" height={24} />
               <span className="font-tabular text-sm font-semibold text-accent">
                 {generationTps.toFixed(1)}
+              </span>
+            </div>
+          </div>
+          <div
+            className="flex items-center justify-between"
+            title="Tokens/sec while the engine is reading the prompt and building KV cache — before the first output token. Opening a saved chat in the UI does not hit the GPU; send (or regenerate) so the history is sent as the prompt. Prefix-cache hits do little compute, so this can stay ~0. Long cold prefills show here until decode starts."
+          >
+            <span className="text-xs text-muted">Prefill tok/s</span>
+            <div className="flex items-center gap-2">
+              <Sparkline data={prefillHistory} color="var(--color-text)" height={24} />
+              <span className="font-tabular text-sm font-semibold text-text">
+                {prefillTps.toFixed(1)}
               </span>
             </div>
           </div>

@@ -40,3 +40,10 @@ test("live decode rate formula matches final decodeTps shape", () => {
   const live = round2((decodeTokens / elapsedMs) * 1000);
   assert.equal(live, 24.75);
 });
+
+test("prefill tok/s is prompt tokens over TTFT", () => {
+  const prefillTokens = 1024;
+  const ttftMs = 80;
+  const prefillTps = round2((prefillTokens / ttftMs) * 1000);
+  assert.equal(prefillTps, 12800);
+});

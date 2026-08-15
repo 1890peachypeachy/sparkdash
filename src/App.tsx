@@ -29,6 +29,7 @@ function placeholderSnapshot(
     llmMonitoring?: boolean;
     comfyMonitoring?: boolean;
     comfyPort?: number;
+    kind?: "spark" | "host";
   }
 ): SparkSnapshot {
   const role =
@@ -43,6 +44,7 @@ function placeholderSnapshot(
   return {
     id,
     name,
+    kind: roleFields?.kind ?? "spark",
     online: false,
     uptime: null,
     disabledDevices,
@@ -183,6 +185,7 @@ function DashboardApp() {
               disabledInterfaces: c.disabledInterfaces || existing.disabledInterfaces,
               llmPorts: c.llmPorts ?? existing.llmPorts,
               llmPort: c.llmPorts?.[0] ?? c.llmPort ?? existing.llmPort,
+              kind: c.kind ?? existing.kind,
             };
           }
           return placeholderSnapshot(
@@ -199,6 +202,7 @@ function DashboardApp() {
               llmMonitoring: c.llmMonitoring,
               comfyMonitoring: c.comfyMonitoring,
               comfyPort: c.comfyPort,
+              kind: c.kind,
             }
           );
         })

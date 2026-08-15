@@ -3,7 +3,9 @@ import type { SparkSnapshot } from "../../api/types";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
 import { updateSpark, refreshSparkMetric, addLlmPort, removeLlmPort } from "../../api/client";
 import { SparkHeader } from "./SparkHeader";
+import { SparkActions } from "./SparkActions";
 import { GpuPanel } from "./GpuPanel";
+import { RamPanel } from "./RamPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { LlmPanel } from "./LlmPanel";
@@ -210,7 +212,13 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: "var(--density-page-gap)" }}>
       <SparkHeader spark={spark} onEdit={onEdit} />
-      <div className="spark-page grid md:grid-cols-2" style={{ gap: "var(--density-page-gap)" }}>
+      {/* Mobile-only action row (Update Hermes / Shutdown·Wake / Edit) — desktop keeps them in the header. */}
+      <SparkActions
+        spark={spark}
+        onEdit={onEdit}
+        className="flex flex-wrap items-center justify-end gap-2 px-1 py-1 sm:hidden"
+      />
+      <div className="spark-page grid grid-cols-1 md:grid-cols-2" style={{ gap: "var(--density-page-gap)" }}>
         <SectionHeading
           title="Resources"
           open={resourcesOpen}
@@ -219,27 +227,56 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
         />
         {resourcesOpen && (
           <>
-            {/* Resources layout: GPU spans the full left column; Storage + Network stack in the right column */}
-            <GpuPanel
-              gpu={metrics.gpu}
-              sparkId={spark.id}
-              temperatureUnit={temperatureUnit}
-              className="md:row-span-2"
-            />
-            <StoragePanel
-              storage={metrics.storage}
-              sparkId={spark.id}
-              disabledDevices={disabledDevices}
-              onDisabledChange={setDisabledDevices}
-              storagePollDisabled={storagePollDisabled}
-              onStoragePollModeChange={handleStoragePollModeChange}
-            />
-            <NetworkPanel
-              network={metrics.network}
-              sparkId={spark.id}
-              disabledInterfaces={disabledInterfaces}
-              onDisabledChange={setDisabledInterfaces}
-            />
+            {spark.kind === "host" ? (
+              /* Hosts: GPU spans the full left column; RAM → Network → Storage stack in the right column */
+              <>
+                <GpuPanel
+                  gpu={metrics.gpu}
+                  sparkId={spark.id}
+                  temperatureUnit={temperatureUnit}
+                  className="md:row-span-3"
+                />
+                <RamPanel ram={metrics.ram} sparkId={spark.id} />
+                <NetworkPanel
+                  network={metrics.network}
+                  sparkId={spark.id}
+                  disabledInterfaces={disabledInterfaces}
+                  onDisabledChange={setDisabledInterfaces}
+                />
+                <StoragePanel
+                  storage={metrics.storage}
+                  sparkId={spark.id}
+                  disabledDevices={disabledDevices}
+                  onDisabledChange={setDisabledDevices}
+                  storagePollDisabled={storagePollDisabled}
+                  onStoragePollModeChange={handleStoragePollModeChange}
+                />
+              </>
+            ) : (
+              /* Resources layout: GPU spans the full left column; Storage + Network stack in the right column */
+              <>
+                <GpuPanel
+                  gpu={metrics.gpu}
+                  sparkId={spark.id}
+                  temperatureUnit={temperatureUnit}
+                  className="md:row-span-2"
+                />
+                <StoragePanel
+                  storage={metrics.storage}
+                  sparkId={spark.id}
+                  disabledDevices={disabledDevices}
+                  onDisabledChange={setDisabledDevices}
+                  storagePollDisabled={storagePollDisabled}
+                  onStoragePollModeChange={handleStoragePollModeChange}
+                />
+                <NetworkPanel
+                  network={metrics.network}
+                  sparkId={spark.id}
+                  disabledInterfaces={disabledInterfaces}
+                  onDisabledChange={setDisabledInterfaces}
+                />
+              </>
+            )}
           </>
         )}
         {/*

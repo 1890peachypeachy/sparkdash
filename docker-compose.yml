@@ -22,6 +22,8 @@ services:
     volumes:
       # Live server code — edits apply after --watch reloads the process
       - ./server:/app/server
+      # Prompt catalog imported by DecodeBench / Showcase (not under ./server)
+      - ./src/shared:/app/src/shared:ro
       # Mount host filesystem for local Spark metrics
       - /proc:/host/proc:ro
       - /sys:/host/sys:ro

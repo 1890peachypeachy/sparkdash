@@ -117,7 +117,15 @@ test("_applyDs4Metrics: gauges + counters + prefix hit rate", () => {
     );
   probe._applyDs4Metrics(active, 2);
   assert.equal(probe.generationTps, 20); // (90-50)/2
-  assert.equal(probe.prefillTps, 40); // ((180+300)-(100+300))/2
+  assert.equal(probe.prefillTps, 40); // computed only (180-100)/2
+
+  // Cached tokens jumping must not inflate prefill
+  const cachedJump = active.replace(
+    'ds4_tokens_prefilled_total{kind="cached"} 300.0',
+    'ds4_tokens_prefilled_total{kind="cached"} 3000.0'
+  );
+  probe._applyDs4Metrics(cachedJump, 2);
+  assert.equal(probe.prefillTps, 0);
 });
 
 test("probe: ds4 path reads context_length and does not mislabel as vllm", async () => {
@@ -127,7 +135,7 @@ test("probe: ds4 path reads context_length and does not mislabel as vllm", async
   probe.authOpen = true;
   probe._lastDetectAt = Date.now();
   probe.lastProbeTime = Date.now() - 2000;
-  probe.lastTokenCounts = { input: 400, output: 50 };
+  probe.lastTokenCounts = { input: 100, output: 50 };
   probe._fetch = async (url) => {
     const u = String(url);
     if (u.endsWith("/v1/models")) {

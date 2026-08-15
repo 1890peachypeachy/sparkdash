@@ -23,6 +23,7 @@ function useEscape(onClose: () => void) {
 
 const defaultConfig: Omit<SparkConfig, "id"> = {
   name: "",
+  kind: "spark",
   lanIp: "",
   cx7Ip: "",
   isLocal: false,
@@ -144,6 +145,18 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
         <div className="modal-sheet__body">
         <div className="space-y-3">
           <div>
+            <label className="mb-1 block text-xs text-muted">Unit type</label>
+            <select
+              value={config.kind ?? "spark"}
+              onChange={(e) => update({ kind: e.target.value as "spark" | "host" })}
+              className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+            >
+              <option value="spark">NVIDIA DGX Spark</option>
+              <option value="host">Dedicated GPU host (Linux, nvidia-smi, not a Spark)</option>
+            </select>
+          </div>
+
+          <div>
             <label className="mb-1 block text-xs text-muted">Name</label>
             <input
               type="text"
@@ -165,16 +178,18 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
             />
           </div>
 
-          <div>
-            <label className="mb-1 block text-xs text-muted">CX7 IP (optional)</label>
-            <input
-              type="text"
-              value={config.cx7Ip || ""}
-              onChange={(e) => update({ cx7Ip: e.target.value || null })}
-              className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
-              placeholder="10.0.0.1"
-            />
-          </div>
+          {config.kind !== "host" && (
+            <div>
+              <label className="mb-1 block text-xs text-muted">CX7 IP (optional)</label>
+              <input
+                type="text"
+                value={config.cx7Ip || ""}
+                onChange={(e) => update({ cx7Ip: e.target.value || null })}
+                className="w-full rounded border border-border bg-surface-elevated px-3 py-1.5 text-xs text-text outline-none focus:border-accent"
+                placeholder="10.0.0.1"
+              />
+            </div>
+          )}
 
           <div>
             <label className="mb-1 block text-xs text-muted">LLM Ports (optional, comma-separated)</label>

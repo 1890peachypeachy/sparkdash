@@ -209,6 +209,23 @@ function SparkCard({
               color={vramBarColor}
               caption={vramTotal > 0 ? `${fmtStorage(vramUsed, false)} / ${fmtStorage(vramTotal, true)}` : "—"}
             />
+            {spark.kind === "host" && (() => {
+              // Non-Spark hosts: system RAM is separate from discrete VRAM.
+              const ram = spark.metrics.ram;
+              const rUsed = ram?.used ?? 0;
+              const rTotal = ram?.total ?? 0;
+              const rPct = rTotal > 0 ? Math.round((rUsed / rTotal) * 100) : 0;
+              const ramBarColor = rPct > 85 ? "bg-danger" : rPct > 60 ? "bg-warning" : "bg-accent";
+              return (
+                <MetricBar
+                  label="RAM"
+                  value={rUsed}
+                  max={rTotal}
+                  color={ramBarColor}
+                  caption={rTotal > 0 ? `${fmtStorage(rUsed, false)} / ${fmtStorage(rTotal, true)}` : "—"}
+                />
+              );
+            })()}
             <MetricBar
               label="Temperature"
               value={displayTemp}
@@ -310,15 +327,25 @@ function SparkCard({
           </div>
 
           {(() => {
+            const role = resolveSparkRole(spark);
+            if (role === "worker") return null;
             const llmArr = spark.metrics.llm;
             const llm = Array.isArray(llmArr) ? llmArr.find((l) => l.available) : null;
             if (!llm) return null;
             return (
-              <div className="mt-3.5 border-t border-border pt-3 text-center">
-                <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
-                  {llm.generationTps.toFixed(0)}
-                </span>
-                <span className="text-sm font-normal text-muted"> tok/s</span>
+              <div className="mt-3.5 grid grid-cols-2 gap-2 border-t border-border pt-3">
+                <div className="text-center">
+                  <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
+                    {llm.generationTps.toFixed(0)}
+                  </span>
+                  <span className="text-sm font-normal text-muted"> tok/s</span>
+                </div>
+                <div className="border-l border-border text-center">
+                  <span className="font-tabular text-[28px] font-bold leading-none text-text-strong">
+                    {llm.prefillTps.toFixed(0)}
+                  </span>
+                  <span className="text-sm font-normal text-muted"> prefill</span>
+                </div>
               </div>
             );
           })()}
@@ -485,7 +512,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
         >
           Overview
         </h1>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-end justify-end gap-3">
           {batchMsg && (
             <span className={`text-[11px] ${batchMsg.tone === "ok" ? "text-success" : "text-danger"}`}>
               {batchMsg.text}
@@ -522,7 +549,7 @@ export function OverviewPage({ sparks, hideOffline = false, temperatureUnit = "c
             </div>
           )}
           {sparks.length > 0 && (
-            <div className="flex items-center gap-1.5">
+            <div className="flex flex-wrap items-center justify-end gap-1.5">
               {hermesMonitoredCount > 0 && (
                 <button
                   type="button"

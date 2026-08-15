@@ -13,6 +13,8 @@
 
 sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)** machines in a single browser window. It streams GPU, CPU, unified memory, storage, network, and local LLM metrics — and lets you add, edit, reorder, or remove Sparks from the UI without restarts or code changes.
 
+It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g. a workstation with a dedicated RTX/L-series card) can be added as a **dedicated GPU host** and monitored the same way via SSH and `nvidia-smi`. For these units the dashboard correctly separates **RAM** (system memory) from **VRAM** (discrete GPU memory).
+
 <img src="./assets/screenshot.jpg" alt="sparkDash Overview page with multiple DGX Spark units, GPU metrics, and LLM status">
 
 ### LLM Prompt Showcase
@@ -47,6 +49,11 @@ sparkDash is a real-time web dashboard for one or more **NVIDIA DGX Spark (GB10)
 
 ## Latest version changelog
 
+### Version 1.8.0 — Non-Spark units, prefill, and host RAM/VRAM
+- **Non-Spark unit support** — add a **dedicated GPU host** (kind `host`): any Linux box with an NVIDIA GPU, monitored via the same SSH + `nvidia-smi` collectors but **not** labeled as a DGX Spark. Hosts get a detected hardware summary (GPU model / driver / CPU / RAM) and separate **RAM** vs **VRAM** panels — VRAM is real discrete GPU memory from `nvidia-smi`, RAM is system memory from `/proc/meminfo`. On the unit page the Resources layout for hosts is **GPU in the left column** with **RAM → Network → Storage stacked in the right column** (Sparks keep their original layout). Overview cards add a RAM bar for hosts.
+- **Prefill tok/s next to decode** — live LLM panel sparkline, Overview cards as two columns (**tok/s** | **prefill**), decode-bench **Prefill** column (`prompt_tokens` ÷ TTFT)
+- **Live prefill** — vLLM engine-step tokens (including short prefills that share a poll with first decode); ds4 computed prefill diffs; 0 when idle. Shows while the engine is reading the prompt / building KV cache (send or regenerate), not when you only open a saved chat
+
 ### Version 1.6.0 — ComfyUI monitoring & compact default
 - **ComfyUI** — opt-in per Spark (port 8188): live jobs, progress, last run, cancel, queue ETA, Open on LAN IP, model inventory
 - **Overview** — Comfy status chip (`idle` / `run` / `Nq`)
@@ -61,7 +68,8 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 
 | Area | What you get |
 |------|----------------|
-| **Multi-unit** | Any number of Sparks; each has a tabbed detail page plus a shared Overview |
+| **Multi-unit** | Any number of units; each has a tabbed detail page plus a shared Overview |
+| **Non-Spark GPU hosts** | Linux boxes with a dedicated NVIDIA GPU are first-class units: same `nvidia-smi` collectors over SSH, detected hardware summary, and separate **RAM** / **VRAM** panels. Detail page: GPU (left) + **RAM → Network → Storage** (right column); Overview cards show RAM and VRAM bars |
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
 | **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live tok/s per server |
@@ -74,7 +82,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Spark uptime** | System uptime displayed inline on each Spark header for at-a-glance availability |
 | **Power controls** | Graceful shutdown (SSH host script) and Wake-on-LAN; batch actions on Overview |
 | **Spark roles** | **Head** / **Worker** / **Standalone** — worker label + head link; standalone can disable LLM monitoring |
-| **Unified memory** | GB10 128 GB LPDDR5X pool (~273 GB/s), GPU/CPU split, bandwidth via `nvidia-smi dmon` |
+| **Unified memory** | GB10 128 GB LPDDR5X pool (~273 GB/s), GPU/CPU split, bandwidth via `nvidia-smi dmon`. Non-Spark hosts show discrete **VRAM** (nvidia-smi) and system **RAM** separately |
 | **Themes** | Dark, light, cool white, OLED — neutral palettes, persisted in `localStorage` |
 | **Secrets** | SSH passwords AES-256-GCM encrypted; never in `sparks.json` or API responses |
 | **Docker-first** | Single privileged container for host metrics; prod and dev Compose files |
@@ -166,7 +174,7 @@ docker compose -f docker-compose.dev.yml up --build
 
 ## Architecture
 
-Design principle: **one Spark model, N instances**. Every Spark is a record in `config/sparks.json`. The same `SparkMonitor`, `SystemCollector`, and `LlmProbe` code runs for all of them. Adding a unit is a config change, not a code change.
+Design principle: **one Spark model, N instances**. Every unit is a record in `config/sparks.json` with a `kind` field (`spark` or `host`). The same `SparkMonitor`, `SystemCollector`, and `LlmProbe` code runs for all of them. Adding a unit is a config change, not a code change.
 
 ```txt
 ┌────────────────────── Docker container (sparkDash) ──────────────────────┐
@@ -300,12 +308,15 @@ Copy `.env.example` to `.env` if needed:
 > When using Docker's default bridge network, keep `BIND_HOST=0.0.0.0`.  
 > With `network_mode: host`, use `BIND_HOST=127.0.0.1` to restrict access to the local host or a reverse proxy.
 
-### Adding a Spark
+### Adding a unit
 
 1. Open the **+** tab.
-2. Set **Name**, **LAN IP** (required), optional **CX7 IP**, **SSH user**, and auth (key or password). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
-3. **Test Connection** for SSH + LLM reachability.
-4. Save — a tab appears and metrics start streaming.
+2. Choose **Unit type**:
+   - **NVIDIA DGX Spark** — the default; hardware summary shows DGX Spark specs and the CX7 IP field is available.
+   - **Dedicated GPU host** — any Linux machine with an NVIDIA GPU. It is monitored exactly like a Spark (SSH + `nvidia-smi`) but is **not** reported as a DGX Spark: the header shows a detected hardware summary (GPU model, CPU, RAM) instead of fixed GB10 specs, and the page shows separate **RAM** and **VRAM** panels (VRAM from `nvidia-smi`, RAM from system memory). On the unit page, RAM → Network → Storage stack in the right column with GPU filling the left column.
+3. Set **Name**, **LAN IP** (required), optional **CX7 IP** (Sparks only), **SSH user**, and auth (key or password). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
+4. **Test Connection** for SSH + LLM reachability.
+5. Save — a tab appears and metrics start streaming.
 
 ### Power controls (shutdown / Wake-on-LAN)
 
@@ -367,7 +378,7 @@ Choice is stored in `localStorage`.
 
 ### Local vs remote Sparks
 
-One `SystemCollector` path for both modes. When `spark.isLocal` is true, metrics come from host sysfs/proc and `nvidia-smi` (often via nsenter into the host namespace). Remote Sparks wrap the same commands in a shared `sshExec()` helper (key agent or `sshpass`).
+One `SystemCollector` path for both modes. When `spark.isLocal` is true, metrics come from host sysfs/proc and `nvidia-smi` (often via nsenter into the host namespace). Remote Sparks wrap the same commands in a shared `sshExec()` helper (key agent or `sshpass`). For `kind: "host"` units, actual hardware (GPU model, driver version, CPU, RAM) is detected once and cached in place of the static DGX Spark specs, and GPU VRAM comes straight from `nvidia-smi` while system RAM is read from `/proc/meminfo`.
 
 ### Graceful degradation
 

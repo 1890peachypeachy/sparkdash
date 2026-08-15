@@ -12,7 +12,7 @@ import { useModalPresence } from "../../hooks/useModalPresence";
 
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32] as const;
 const DEFAULT_SELECTED = [1, 2];
-const DEFAULT_MAX_TOKENS = 500;
+const DEFAULT_MAX_TOKENS = 512;
 
 interface BenchmarkDialogProps {
   open: boolean;
@@ -461,7 +461,9 @@ export function BenchmarkDialog({
                   <label htmlFor="bench-max-tokens" className="bench-sheet__section-title">
                     Max tokens / stream
                   </label>
-                  <p className="bench-sheet__hint">Default 500 · range 64–2048</p>
+                  <p className="bench-sheet__hint">
+                    Default 512 · range 64–2048 · Showcase structural, temp 0, thinking off
+                  </p>
                 </div>
                 <input
                   id="bench-max-tokens"
@@ -553,8 +555,8 @@ export function BenchmarkDialog({
 
               {job.results.length > 0 && (
                 <p className="bench-legend">
-                  <strong>Aggregate</strong> — total tok/s across all concurrent streams.{" "}
-                  <strong>Stream</strong> — per-stream average.
+                  <strong>Aggregate</strong> — total decode tok/s across all concurrent streams.{" "}
+                  <strong>Stream</strong> — per-stream average decode.
                 </p>
               )}
             </section>

@@ -91,6 +91,21 @@ export class SparkMonitor {
     };
     this._lastUpdate = {};
 
+    // Hardware summary: kind "spark" uses the static DGX Spark specs; kind
+    // "host" (dedicated GPU Linux box) detects real hardware once in the
+    // background so the header doesn't mislabel the machine as a Spark.
+    this._hardwareSummary = this._staticHardwareSummary(spark);
+    this._stopped = false;
+    if (spark?.kind === "host") {
+      void this.collector
+        .detectHardware()
+        .then((detected) => {
+          if (this._stopped || !detected) return;
+          this._hardwareSummary = { ...this._hardwareSummary, ...detected };
+        })
+        .catch(() => {});
+    }
+
     // Timers
     this._intervals = [];
     /** @type {ReturnType<typeof setInterval> | null} */
@@ -275,6 +290,7 @@ export class SparkMonitor {
   start() {
     if (this._running) return;
     this._running = true;
+    this._stopped = false;
     this._poll();
     this._intervals.push(setInterval(() => this._pollDomain("gpu"), POLL_INTERVAL_GPU));
     this._intervals.push(setInterval(() => this._pollDomain("cpu"), POLL_INTERVAL_CPU));
@@ -293,6 +309,7 @@ export class SparkMonitor {
   /** Stop background polling. */
   stop() {
     this._running = false;
+    this._stopped = true;
     for (const id of this._intervals) clearInterval(id);
     this._intervals = [];
     this._llmIntervalId = null;
@@ -316,6 +333,7 @@ export class SparkMonitor {
     return {
       id: this.spark.id,
       name: this.spark.name,
+      kind: this.spark.kind || "spark",
       online: this.online,
       uptime: this._uptimeSeconds,
       lanIp: this.spark.lanIp || "",
@@ -338,7 +356,7 @@ export class SparkMonitor {
       comfyMonitoring: comfyOn,
       comfyPort: this._comfyPort(),
       hermes: this._hermes,
-      hardware: this._getHardwareSummary(),
+      hardware: this._hardwareSummary,
       metrics: {
         // NOTE: no `timestamp` here on purpose. The broadcast path skips
         // snapshots whose JSON is byte-identical to the previous one (see
@@ -658,8 +676,24 @@ export class SparkMonitor {
     }
   }
 
-  // ─── Hardware summary (cached, computed once) ─────────────
-  _getHardwareSummary() {
+  // ─── Hardware summary ─────────────────────────────────────
+  /**
+   * Static summary used for kind "spark" (DGX Spark specs) and as the
+   * pre-detection fallback for kind "host". kind "host" is then enriched
+   * with real hardware from `detectHardware()` once available.
+   */
+  _staticHardwareSummary(spark) {
+    if (spark?.kind === "host") {
+      return {
+        device: "Linux GPU host",
+        cpuModel: null,
+        cpuCores: null,
+        totalMemoryGB: null,
+        gpuChip: null,
+        cudaDriver: null,
+        storageModel: null,
+      };
+    }
     return {
       device: "NVIDIA DGX Spark",
       cpuModel: "GB10",
@@ -671,3 +705,4 @@ export class SparkMonitor {
     };
   }
 }
+

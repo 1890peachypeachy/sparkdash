@@ -253,16 +253,24 @@ export class SystemCollector {
     const { totalMB: memTotalMB, availMB } = await this._readMeminfoMB();
     availableMB = availMB;
 
-    // Prefer the OS-visible pool (MemTotal) as the total; fall back to the nvidia-smi
-    // value, then the hardware spec (HBM) only if nothing else is known.
-    if (memTotalMB > 0) {
-      total = memTotalMB;
-    } else if (total == null || total === 0) {
-      total = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
+    const usedMB = Math.round(used || 0);
+    let totalMB = Math.round(total || 0);
+
+    if (this.spark.kind === "host") {
+      // Discrete GPU VRAM: trust nvidia-smi's memory.total (e.g. 24 GB L4), and
+      // only fall back to the OS pool / Spark spec when nvidia-smi says N/A.
+      // Free VRAM = total − used (unlike the shared pool, GPU memory is dedicated).
+      if (totalMB <= 0 && memTotalMB > 0) totalMB = memTotalMB;
+      else if (totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
+      if (totalMB > 0 && usedMB > 0) availableMB = Math.max(0, totalMB - usedMB);
+    } else {
+      // GB10 shared HBM pool: prefer the OS-visible pool (MemTotal) as the total,
+      // fall back to nvidia-smi, then the hardware spec (HBM) only if nothing known.
+      if (memTotalMB > 0) totalMB = memTotalMB;
+      else if (totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
+      availableMB = availMB;
     }
 
-    const usedMB = Math.round(used || 0);
-    const totalMB = Math.round(total || 0);
     const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
 
     return { used: usedMB, total: totalMB, percentage, available: availableMB };
@@ -953,16 +961,21 @@ export class SystemCollector {
       const totalMatch = meminfoOut.match(/MemTotal:\s+(\d+)\s+kB/);
       const availMatch = meminfoOut.match(/MemAvailable:\s+(\d+)\s+kB/);
       const memTotalMB = totalMatch ? Math.round(parseInt(totalMatch[1]) / 1024) : 0;
-      const availableMB = availMatch ? Math.round(parseInt(availMatch[1]) / 1024) : 0;
-
-      if (memTotalMB > 0) {
-        total = memTotalMB;
-      } else if (total == null || total === 0) {
-        total = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
-      }
+      let availableMB = availMatch ? Math.round(parseInt(availMatch[1]) / 1024) : 0;
 
       const usedMB = Math.round(used || 0);
-      const totalMB = Math.round(total || 0);
+      let totalMB = Math.round(total || 0);
+      if (this.spark.kind === "host") {
+        // Discrete GPU VRAM: trust nvidia-smi's memory.total; free VRAM = total − used.
+        if (totalMB <= 0 && memTotalMB > 0) totalMB = memTotalMB;
+        else if (totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
+        if (totalMB > 0 && usedMB > 0) availableMB = Math.max(0, totalMB - usedMB);
+      } else {
+        // GB10 shared HBM pool: prefer the OS-visible pool (MemTotal) as the total,
+        // fall back to nvidia-smi, then the hardware spec (HBM) only if nothing known.
+        if (memTotalMB > 0) totalMB = memTotalMB;
+        else if (totalMB <= 0) totalMB = DGX_SPARK.MEMORY_HBM_SIZE_GB * 1024; // Convert to MB
+      }
       const percentage = totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0;
 
       // Rough system power estimate: GPU draw + 20W CX7/peripherals
@@ -1301,6 +1314,77 @@ export class SystemCollector {
       return this._execOnHost(cmd);
     }
     return this._exec(cmd);
+  }
+
+  /**
+   * One-shot real-hardware detection (GPU chip + driver, CPU model/cores, RAM).
+   * Used for kind === "host" units (dedicated GPU Linux boxes) so the header
+   * doesn't claim DGX Spark specs. Returns null on any failure → caller keeps
+   * its static fallback summary.
+   * @returns {Promise<object|null>}
+   */
+  async detectHardware() {
+    try {
+      let smiOut = "";
+      let cpuinfo = "";
+      let meminfo = "";
+      let coresParsed = null;
+      if (this.spark.isLocal) {
+        const results = await Promise.all([
+          this._nvidiaSmi(
+            "--query-gpu=name,driver_version --format=csv,noheader,nounits 2>/dev/null"
+          ).catch(() => ""),
+          this._readHostFile("/proc/cpuinfo").catch(() => ""),
+          this._readHostFile("/proc/meminfo").catch(() => ""),
+        ]);
+        smiOut = results[0];
+        cpuinfo = results[1];
+        meminfo = results[2];
+        coresParsed = (cpuinfo.match(/processor\s*:/g) || []).length;
+      } else {
+        const out = await sshExec(this.spark, [
+          "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader,nounits 2>/dev/null",
+          "echo '---'",
+          "grep -E '^model name' /proc/cpuinfo | head -1",
+          "echo '---'",
+          "grep -E 'processor\\s*:' /proc/cpuinfo | wc -l",
+          "echo '---'",
+          "grep -E 'MemTotal' /proc/meminfo",
+        ].join("; "));
+        const parts = out.split("---");
+        smiOut = parts[0]?.trim() || "";
+        cpuinfo = parts[1]?.trim() || "";
+        meminfo = parts[3]?.trim() || "";
+        const n = parseInt(parts[2]?.trim() || "", 10);
+        coresParsed = Number.isInteger(n) && n > 0 ? n : null;
+      }
+
+      const smiLine = smiOut.split("\n").find(Boolean) || "";
+      const smiParts = smiLine.split(",").map((s) => s.trim());
+      const gpuChip = smiParts[0] || null;
+      const cudaDriver = smiParts[1] || null;
+
+      const modelMatch = cpuinfo.match(/model name\s*:\s*(.+)/i);
+      const cpuModel = modelMatch ? modelMatch[1].trim() : null;
+      const cpuCores = coresParsed !== null && coresParsed > 0 ? coresParsed : null;
+
+      const memMatch = meminfo.match(/MemTotal:\s+(\d+)\s+kB/);
+      const totalMemoryGB = memMatch
+        ? Math.max(1, Math.round(parseInt(memMatch[1], 10) / 1024 / 1024))
+        : null;
+
+      return {
+        device: "Linux GPU host",
+        cpuModel,
+        cpuCores,
+        totalMemoryGB,
+        gpuChip,
+        cudaDriver,
+        storageModel: null,
+      };
+    } catch {
+      return null;
+    }
   }
 
   /**

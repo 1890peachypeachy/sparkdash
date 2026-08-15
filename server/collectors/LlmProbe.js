@@ -81,6 +81,10 @@ export class LlmProbe {
     // Per-slot rate tracking (for llama.cpp native path)
     this.slotState = new Map();
     this.lastTokenCounts = { input: 0, output: 0 };
+    /** Previous vLLM TTFT histogram `_sum` (seconds). null until first sample. */
+    this.lastTtftSum = null;
+    /** Previous `vllm:iteration_tokens_total_sum` (engine-step tokens). */
+    this.lastIterSum = null;
     this.lastProbeTime = 0;
 
     // Cumulative total output tokens (generation) as reported by the LLM server
@@ -106,6 +110,18 @@ export class LlmProbe {
     this._lastDetectAt = 0;
     /** @type {{ value: number, liveUntil: number } | null} */
     this._sglangStickyTps = null;
+  }
+
+  /**
+   * Prefill is a short burst; decode then runs with Δprompt=0.
+   * Keep the last real prefill rate while the engine is still in-flight, then 0.
+   * @param {number} rate
+   * @param {boolean} inflight
+   */
+  _setPrefillTps(rate, inflight) {
+    const rounded = Math.max(0, Math.round(rate * 100) / 100);
+    if (rounded > 0) this.prefillTps = rounded;
+    else if (!inflight) this.prefillTps = 0;
   }
 
   /** Update probe port (and host from spark). Resets detection when the target changes. */
@@ -190,6 +206,8 @@ export class LlmProbe {
     this.mtpAcceptanceRate = null;
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
+    this.lastTtftSum = null;
+    this.lastIterSum = null;
     this._sglangStickyTps = null;
   }
 
@@ -413,7 +431,16 @@ export class LlmProbe {
    */
   _applyDs4Metrics(txt, dtSec) {
     const decoded = this._getPromMetric(txt, "ds4_tokens_decoded_total");
-    const prefilled = this._getPromMetric(txt, "ds4_tokens_prefilled_total");
+    const computedPrefill = this._getPromMetricLabeled(
+      txt,
+      "ds4_tokens_prefilled_total",
+      "kind",
+      "computed"
+    );
+    const prefilled =
+      computedPrefill ?? this._getPromMetric(txt, "ds4_tokens_prefilled_total");
+    const inflightHint = this._getPromMetric(txt, "ds4_requests_inflight");
+    const inflight = inflightHint != null && inflightHint > 0;
 
     if (decoded != null) {
       if (prefilled != null && dtSec > 0 && dtSec < 10) {
@@ -424,16 +451,16 @@ export class LlmProbe {
       } else if (dtSec > 0 && dtSec < 10) {
         const deltaOut = decoded - this.lastTokenCounts.output;
         this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+        if (!inflight && deltaOut <= 0) this.prefillTps = 0;
       }
       if (prefilled != null) this.lastTokenCounts.input = prefilled;
       this.lastTokenCounts.output = decoded;
       this.totalOutputTokens = decoded;
     } else {
       // No counters — fall back to window gauges only while something is in flight
-      const inflightHint = this._getPromMetric(txt, "ds4_requests_inflight");
       const gaugeGen = this._getPromMetric(txt, "ds4_decode_tok_s");
       const gaugePrefill = this._getPromMetric(txt, "ds4_prefill_tok_s");
-      if (inflightHint != null && inflightHint > 0) {
+      if (inflight) {
         if (gaugeGen != null) {
           this.generationTps = Math.max(0, Math.round(gaugeGen * 100) / 100);
         }
@@ -446,9 +473,9 @@ export class LlmProbe {
       }
     }
 
-    const inflight = this._getPromMetric(txt, "ds4_requests_inflight");
-    this.requestsRunning = inflight;
-    if (inflight != null) this.slotsActive = Math.round(inflight);
+    const inflightCount = this._getPromMetric(txt, "ds4_requests_inflight");
+    this.requestsRunning = inflightCount;
+    if (inflightCount != null) this.slotsActive = Math.round(inflightCount);
 
     const banksTotal = this._getPromMetric(txt, "ds4_banks_total");
     if (banksTotal != null) this.slotsTotal = Math.round(banksTotal);
@@ -495,19 +522,43 @@ export class LlmProbe {
   _applyVllmMetrics(txt, dtSec) {
     const promptTokens = this._getVllmMetric(txt, "prompt_tokens_total");
     const genTokens = this._getVllmMetric(txt, "generation_tokens_total");
+    const running = this._getVllmMetric(txt, "num_requests_running");
+    const iterSum = this._getVllmMetric(txt, "iteration_tokens_total_sum");
     if (promptTokens != null && genTokens != null) {
       const deltaIn = promptTokens - this.lastTokenCounts.input;
       const deltaOut = genTokens - this.lastTokenCounts.output;
       this.lastTokenCounts.input = promptTokens;
       this.lastTokenCounts.output = genTokens;
       this.totalOutputTokens = genTokens;
+      const ttftSum = this._getVllmMetric(txt, "time_to_first_token_seconds_sum");
+      const deltaIter =
+        iterSum != null && this.lastIterSum != null ? iterSum - this.lastIterSum : 0;
       if (dtSec > 0 && dtSec < 10) {
         this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        const deltaTtft =
+          ttftSum != null && this.lastTtftSum != null ? ttftSum - this.lastTtftSum : 0;
+        // Engine-step tokens include prefill+decode. Surplus over generation is
+        // prefill, including the common case where a short/cached prefill lands
+        // in the same poll as the first decode tokens.
+        const prefillIter = Math.max(0, deltaIter - Math.max(0, deltaOut));
+        const specNoise = deltaOut > 0 && prefillIter > 0 && prefillIter < deltaOut * 0.5;
+        const livePrefill =
+          prefillIter > 0 && !specNoise ? prefillIter / dtSec : 0;
+        const finishedPrefill =
+          deltaIn > 0 && deltaTtft > 0
+            ? deltaIn / deltaTtft
+            : deltaIn > 0 && livePrefill <= 0
+              ? deltaIn / dtSec
+              : 0;
+        this.prefillTps = Math.max(
+          0,
+          Math.round((livePrefill > 0 ? livePrefill : finishedPrefill) * 100) / 100
+        );
       }
+      if (ttftSum != null) this.lastTtftSum = ttftSum;
     }
+    if (iterSum != null) this.lastIterSum = iterSum;
 
-    const running = this._getVllmMetric(txt, "num_requests_running");
     this.requestsRunning = running;
     if (running != null) this.slotsActive = Math.round(running);
 
@@ -594,7 +645,7 @@ export class LlmProbe {
         this.totalOutputTokens = output;
         if (dtSec > 0 && dtSec < 10) {
           this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
-          this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+          this._setPrefillTps(deltaIn / dtSec, deltaOut > 0);
         }
         return;
       }
@@ -700,8 +751,10 @@ export class LlmProbe {
       this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
       if (prompt != null) {
         const deltaIn = prompt - this.lastTokenCounts.input;
-        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+        this._setPrefillTps(deltaIn / dtSec, deltaOut > 0);
         this.lastTokenCounts.input = prompt;
+      } else if (deltaOut <= 0) {
+        this.prefillTps = 0;
       }
     }
     this.lastTokenCounts.output = gen;
@@ -776,7 +829,7 @@ export class LlmProbe {
 
           this.totalOutputTokens = totalDecoded;
           this.generationTps = Math.max(0, Math.round(totalGen * 100) / 100);
-          this.prefillTps = Math.max(0, Math.round(totalPrefill * 100) / 100);
+          this._setPrefillTps(totalPrefill, totalGen > 0);
         }
       }
     } catch {}

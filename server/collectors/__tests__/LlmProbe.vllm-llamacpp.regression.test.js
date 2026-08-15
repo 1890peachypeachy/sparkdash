@@ -90,8 +90,8 @@ test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm",
   assert.equal(snap.backend, "vllm");
   assert.equal(snap.modelId, "meta-llama/Llama-3.1-8B");
   assert.equal(snap.contextLength, 8192);
-  assert.equal(snap.generationTps, 200); // (900-500)/2
-  assert.equal(snap.prefillTps, 100); // (1200-1000)/2
+  assert.ok(Math.abs(snap.generationTps - 200) < 2, `generationTps ${snap.generationTps}`);
+  assert.ok(Math.abs(snap.prefillTps - 100) < 2, `prefillTps ${snap.prefillTps}`);
   assert.equal(snap.slotsActive, 2);
   assert.equal(snap.requestsWaiting, 1);
   assert.equal(snap.kvCacheUsage, 0.42);
@@ -122,6 +122,73 @@ test("vLLM idle: flat counters → 0 tok/s (not sticky gauge logic)", async () =
   assert.equal(snap.backend, "vllm");
   assert.equal(snap.generationTps, 0);
   assert.equal(snap.prefillTps, 0);
+});
+
+test("vLLM prefill uses TTFT histogram sum when it advances", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe.lastTokenCounts = { input: 1000, output: 500 };
+  probe.lastTtftSum = 10;
+  const body = `${VLLM_METRICS.replace("1000.0", "1200.0").replace("500.0", "900.0")}
+vllm:time_to_first_token_seconds_sum{engine="0"} 10.05
+`;
+  probe._applyVllmMetrics(body, 2);
+  assert.equal(probe.generationTps, 200); // (900-500)/2
+  // Δprompt 200 / Δttft 0.05s = 4000 tok/s, not smeared 200/2=100
+  assert.equal(probe.prefillTps, 4000);
+});
+
+test("vLLM prefill falls back to poll dt when TTFT sum is flat", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe.lastTokenCounts = { input: 1000, output: 500 };
+  probe.lastTtftSum = 10;
+  const body = `${VLLM_METRICS.replace("1000.0", "1200.0").replace("500.0", "900.0")}
+vllm:time_to_first_token_seconds_sum{engine="0"} 10.0
+`;
+  probe._applyVllmMetrics(body, 2);
+  assert.equal(probe.prefillTps, 100); // (1200-1000)/2
+});
+
+test("vLLM prefill uses live iteration tokens before decode starts", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe.lastTokenCounts = { input: 1000, output: 500 };
+  probe.lastIterSum = 2000;
+  const prefillBody = `${VLLM_METRICS}
+vllm:iteration_tokens_total_sum{engine="0"} 3600.0
+`;
+  probe._applyVllmMetrics(prefillBody, 2);
+  // Δiter 1600 / 2s, generation flat → live prefill during PREFILL
+  assert.equal(probe.prefillTps, 800);
+  assert.equal(probe.generationTps, 0);
+});
+
+test("vLLM prefill still counts when first decode tokens share the poll", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe.lastTokenCounts = { input: 1000, output: 500 };
+  probe.lastIterSum = 2000;
+  probe._applyVllmMetrics(
+    `${VLLM_METRICS.replace("500.0", "700.0")}
+vllm:iteration_tokens_total_sum{engine="0"} 4200.0
+`,
+    2
+  );
+  // Δiter 2200 − Δgen 200 = 2000 prefill tokens / 2s
+  assert.equal(probe.prefillTps, 1000);
+  assert.equal(probe.generationTps, 100);
+});
+
+test("vLLM decode-only iteration surplus is treated as spec noise, not prefill", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe.lastTokenCounts = { input: 1000, output: 500 };
+  probe.lastIterSum = 2000;
+  probe._applyVllmMetrics(
+    `${VLLM_METRICS.replace("500.0", "900.0")}
+vllm:iteration_tokens_total_sum{engine="0"} 2480.0
+`,
+    2
+  );
+  // Δiter 480, Δgen 400 → surplus 80 < 50% of decode → ignore
+  assert.equal(probe.generationTps, 200);
+  assert.equal(probe.prefillTps, 0);
 });
 
 test("vLLM /metrics body is not misread as ds4", () => {

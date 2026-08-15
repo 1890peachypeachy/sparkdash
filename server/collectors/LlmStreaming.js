@@ -144,6 +144,27 @@ export function estimateTokenCount(text) {
   return Math.max(1, Math.round(text.length / 4));
 }
 
+/** Concatenate string message contents from an OpenAI chat body (prefill fallback). */
+/** vLLM-oriented fields that some OpenAI-compat servers reject with HTTP 400. */
+export function stripFillForceFields(body) {
+  if (!body || typeof body !== "object") return body;
+  const next = { ...body };
+  delete next.min_tokens;
+  delete next.ignore_eos;
+  delete next.stop;
+  return next;
+}
+
+export function promptTextFromBody(body) {
+  const msgs = body?.messages;
+  if (!Array.isArray(msgs)) return "";
+  const parts = [];
+  for (const m of msgs) {
+    if (typeof m?.content === "string" && m.content) parts.push(m.content);
+  }
+  return parts.join("\n");
+}
+
 /**
  * Extract visible text pieces from an OpenAI-compatible delta (or choice.text).
  * Counts content + reasoning / reasoning_content so thinking models stay "alive".
@@ -369,6 +390,7 @@ async function runStreamingRequestOnce(
   let reasoningChunkCount = 0;
   let chunkTokenCount = 0;
   let usageCompletionTokens = null;
+  let usagePromptTokens = null;
   /** @type {Record<string, number> | null} */
   let usage = null;
   let model = null;
@@ -454,15 +476,16 @@ async function runStreamingRequestOnce(
           if (debug && json.id && !completionId) completionId = String(json.id);
           if (json.model) model = json.model;
           if (json.usage && typeof json.usage === "object") {
-            if (debug) {
-              usage = {
-                promptTokens: Number(json.usage.prompt_tokens) || 0,
-                completionTokens: Number(json.usage.completion_tokens) || 0,
-                totalTokens: Number(json.usage.total_tokens) || 0,
-              };
-            }
+            usage = {
+              promptTokens: Number(json.usage.prompt_tokens) || 0,
+              completionTokens: Number(json.usage.completion_tokens) || 0,
+              totalTokens: Number(json.usage.total_tokens) || 0,
+            };
             if (json.usage.completion_tokens != null) {
               usageCompletionTokens = Number(json.usage.completion_tokens);
+            }
+            if (json.usage.prompt_tokens != null) {
+              usagePromptTokens = Number(json.usage.prompt_tokens);
             }
           }
 
@@ -532,6 +555,14 @@ async function runStreamingRequestOnce(
   const decodeTps =
     decodeMs > 0 && decodeTokens > 0 ? (decodeTokens / decodeMs) * 1000 : 0;
 
+  const promptEstimate = estimateTokenCount(promptTextFromBody(body));
+  const prefillTokens =
+    usagePromptTokens != null && usagePromptTokens > 0
+      ? usagePromptTokens
+      : promptEstimate;
+  const prefillTps =
+    ttftMs > 0 && prefillTokens > 0 ? (prefillTokens / ttftMs) * 1000 : 0;
+
   /** @type {Record<string, unknown>} */
   const out = {
     ttftMs: round2(ttftMs),
@@ -542,8 +573,11 @@ async function runStreamingRequestOnce(
     completionTokens,
     decodeTokens,
     decodeTps: round2(decodeTps),
+    prefillTokens,
+    prefillTps: round2(prefillTps),
     totalMs: round2(totalMs),
     /** Absolute performance.now() marks for wave-level aggregation */
+    t0,
     tFirst,
     tLast,
     model,

@@ -2,6 +2,13 @@
 export interface SparkConfig {
   id: string;
   name: string;
+  /**
+   * Unit type:
+   * - spark: NVIDIA DGX Spark (default) — DGX Spark specs shown in the header.
+   * - host: any Linux box with an NVIDIA GPU (still monitored via nvidia-smi,
+   *   just not a Spark). Real hardware is auto-detected once online.
+   */
+  kind?: "spark" | "host";
   lanIp: string;
   cx7Ip?: string | null;
   /**
@@ -153,10 +160,10 @@ export interface HermesUpdatesResponse {
 // ─── Hardware info ───────────────────────────────────────
 export interface HardwareInfo {
   device: string;
-  cpuModel: string;
-  cpuCores: number;
-  totalMemoryGB: number;
-  gpuChip: string;
+  cpuModel: string | null;
+  cpuCores: number | null;
+  totalMemoryGB: number | null;
+  gpuChip: string | null;
   cudaDriver: string | null;
   storageModel: string | null;
 }
@@ -407,6 +414,8 @@ export interface SparkMetrics {
 export interface SparkSnapshot {
   id: string;
   name: string;
+  /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
+  kind?: "spark" | "host";
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;
@@ -495,6 +504,8 @@ export interface DecodeBenchStreamResult {
   decodeTps: number;
   decodeTokens: number;
   completionTokens: number;
+  prefillTps: number;
+  prefillTokens: number;
   totalMs: number;
   error: string | null;
   /** Exact prompt used for this stream (debug). */
@@ -543,6 +554,11 @@ export interface DecodeBenchLevelResult {
   medianTtftMs: number;
   /** Client: total post-first-token tokens / concurrent decode window */
   aggregateDecodeTps: number;
+  meanPrefillTps: number;
+  medianPrefillTps: number;
+  /** Sum prompt tokens / concurrent TTFT window (min start → max first token) */
+  aggregatePrefillTps: number;
+  totalPrefillTokens: number;
   totalDecodeTokens: number;
   totalCompletionTokens: number;
   durationMs: number;

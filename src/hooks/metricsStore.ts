@@ -96,6 +96,9 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
     if (m.cpu) {
       pushHistory(`${s.id}:cpu.usage`, m.cpu.usage);
     }
+    if (m.ram) {
+      pushHistory(`${s.id}:ram.percentage`, m.ram.percentage);
+    }
     if (Array.isArray(m.llm)) {
       // Zip with snapshot.llmPorts so multi-port LLM series key distinctly.
       const ports = s.llmPorts ?? [];
@@ -104,6 +107,7 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         const port = ports[i];
         const portKey = port != null ? `:${port}` : `:${i}`;
         pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
+        pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps);
       }
     }
     if (m.comfy?.available) {

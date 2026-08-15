@@ -183,12 +183,12 @@ export function GpuPanel({ gpu, sparkId, temperatureUnit, className }: GpuPanelP
         <div className="space-y-1.5 border-t border-border pt-3">
           <div className="text-[10px] uppercase tracking-wide text-muted">Processes</div>
           {gpu.processes.map((proc) => (
-            <div key={proc.pid} className="flex items-center justify-between text-xs">
-              <div className="min-w-0 flex-1">
-                <span className="truncate text-text" title={`${proc.name} (PID ${proc.pid})`}>
+            <div key={proc.pid} className="flex items-center justify-between gap-2 text-xs">
+              <div className="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span className="min-w-0 truncate text-text" title={`${proc.name} (PID ${proc.pid})`}>
                   {proc.name}
                 </span>
-                <span className="ml-1.5 font-tabular text-[10px] text-muted">
+                <span className="shrink-0 font-tabular text-[10px] text-muted">
                   {proc.pid}
                 </span>
               </div>
