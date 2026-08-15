@@ -139,7 +139,7 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
         aria-labelledby="add-spark-title"
       >
         <div className="modal-sheet__header" id="add-spark-title">
-          Add Spark
+          Add Spark/GPU Host
         </div>
 
         <div className="modal-sheet__body">
