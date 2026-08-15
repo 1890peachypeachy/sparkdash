@@ -497,9 +497,10 @@ export function EditSparkDialog({
                 </span>
               </label>
               <p className="mt-1 text-[10px] text-muted">
-                Toasts when a Hermes update is available and adds a one-click update (runs{" "}
+                Checks for updates in the background (10 min) and adds an "Update Hermes" button
+                that runs{" "}
                 <code className="rounded bg-surface-elevated px-1">hermes update</code> on this
-                machine).
+                machine via SSH.
               </p>
 
               {role === "worker" && (

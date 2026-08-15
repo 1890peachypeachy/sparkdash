@@ -32,6 +32,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - [Latest version changelog](#latest-version-changelog)
 - [Features](#features)
 - [ComfyUI monitoring](#comfyui-monitoring)
+- [Hermes Agent monitoring](#hermes-agent-monitoring)
 - [Full changelog](./CHANGELOG.md)
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
@@ -74,6 +75,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
 | **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live tok/s per server |
 | **ComfyUI** | Opt-in probe: queue/jobs, progress, cancel, Open link, inventory, overview chip |
+| **Hermes Agent** | Opt-in per unit: background update check (10 min), status badges, one-click or batch `hermes update` |
 | **Decode benchmark** | Multi-concurrency streaming decode tok/s (server + per-stream), persisted last run |
 | **Prompt Showcase** | Full-page multi-terminal LLM streaming demo (up to 32 prompts) with live tok/s and copy-out |
 | **vLLM health** | KV cache %, run/wait queue, TTFT/E2E/ITL p95, preemptions, prefix cache, MTP accept from Prometheus `/metrics` |
@@ -145,6 +147,56 @@ The Spark page **Services** section shows the ComfyUI card. On Overview, a small
 | POST | `/api/sparks/:id/comfy/cancel` | Cancel a job (`{ "promptId": "<uuid>" }`) — interrupt running and/or remove from queue |
 
 Env (optional): `COMFY_PORT` (default `8188`), `COMFY_PROBE_TIMEOUT_MS`, `POLL_INTERVAL_COMFY`.
+
+---
+
+## Hermes Agent monitoring
+
+sparkDash can **optionally** monitor [Hermes Agent](https://github.com/nousresearch/hermes-agent) (nousresearch/hermes-agent) on each unit and run one-click updates for you over SSH.
+
+### What is supported
+
+| Capability | Details |
+|------------|---------|
+| **Opt-in per Spark** | `hermesMonitoring` (default **off**) in **Edit Spark** |
+| **Auto update check** | Background `hermes update --check` over SSH (default every 10 min) — returns update availability + pending commits |
+| **Status badges** | In the Spark header: `Hermes` (installed version), `Hermes not found` if the binary is missing |
+| **One-click update** | **Update Hermes** button opens a dialog with live status, real pending commits, and release notes; **Update now** runs `hermes update` via SSH (non-interactive go) |
+| **Update state** | Running / success / error surfaced live (button turns into a “Hermes updating… / failed” state) |
+| **Batch update** | **Update Hermes** on Overview runs `hermes update` on every monitored unit, with a live per-unit progress bar |
+
+### How to enable (per Spark)
+
+1. Open the Spark tab → **Edit** (pencil).
+2. Enable **Hermes Agent**.
+3. **Save** — background checks start immediately.
+
+The **Update Hermes** button appears in the Spark header/mobile action row; it turns warning-yellow with a commit-count badge only when an update is actually available. It also appears on Overview (batch) when at least one unit has Hermes enabled.
+
+**Connectivity check note:** local units run the check as the **host user** (via `setpriv`/`nsenter`, never as container root); remote units run it over SSH. Either way, the logged-in user needs permission to read the Hermes repo.
+
+### Side requirements
+
+- **Hermes Agent must be installed on the target machine** — sparkDash only checks & updates; it does not install it. The binary is looked up in `~/.local/bin` and `/usr/local/bin`.
+- SSH user must be able to run `hermes update --check` / `hermes update` non-interactively (key auth recommended).
+- An update can take a few minutes (repo pull + dependency reinstall); a stale `*.lock` file from a crashed run is cleared before each attempt.
+
+### Config fields (persisted on the Spark)
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `hermesMonitoring` | `false` | Check/update Hermes Agent on this machine |
+
+### Related API
+
+| Method | Path | Purpose |
+|--------|------|---------|
+| POST | `/api/sparks/hermes/update-all` | Batch `hermes update` on every monitored Spark (Overview button) |
+| POST | `/api/sparks/:id/hermes/check` | Force `hermes update --check` now |
+| POST | `/api/sparks/:id/hermes/update` | Run `hermes update` in the background (202) |
+| GET | `/api/sparks/:id/hermes/updates` | Update preview: latest release + installed version + real pending commits + resolved view |
+
+Env (optional): `POLL_INTERVAL_HERMES` (default `600000` ms), `HERMES_UPDATE_TIMEOUT_MS` (default `600000` ms).
 
 ---
 
@@ -299,6 +351,8 @@ Copy `.env.example` to `.env` if needed:
 | `POLL_INTERVAL_STORAGE` | `5000` | Storage poll (ms) |
 | `POLL_INTERVAL_LLM` | `2000` | LLM probe poll (ms) |
 | `POLL_INTERVAL_BANDWIDTH` | `2000` | Memory bandwidth / dmon poll (ms) |
+| `POLL_INTERVAL_HERMES` | `600000` | Hermes Agent update check poll (ms) |
+| `HERMES_UPDATE_TIMEOUT_MS` | `600000` | Hard timeout for running `hermes update` over SSH (ms) |
 | `POLL_INTERVAL_LIVENESS` | `5000` | Online/SSH liveness check (ms) |
 | `SPARKDASH_SECRETS_KEY` | _(auto)_ | Passphrase or 64-char hex for secret encryption |
 | `HOST_PROC_PATH` | `/host/proc` | Host proc mount inside container |
