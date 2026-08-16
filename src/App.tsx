@@ -29,7 +29,7 @@ function placeholderSnapshot(
     llmMonitoring?: boolean;
     comfyMonitoring?: boolean;
     comfyPort?: number;
-    kind?: "spark" | "host";
+    kind?: "spark" | "host" | "mac";
   }
 ): SparkSnapshot {
   const role =

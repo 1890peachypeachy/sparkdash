@@ -36,7 +36,10 @@ export class SystemCollector {
 
   /** Collect GPU metrics (temperature, usage, power, VRAM). */
   async collectGpu() {
-    if (!this.spark.isLocal) return this._getRemoteGpu();
+    if (!this.spark.isLocal) {
+      if (this.spark.kind === "mac") return this._getRemoteMacGpu();
+      return this._getRemoteGpu();
+    }
     try {
       const gpuData = await this._getGPUAll();
       return gpuData;
@@ -48,7 +51,10 @@ export class SystemCollector {
 
   /** Collect CPU metrics (usage, temperature, power). */
   async collectCpu() {
-    if (!this.spark.isLocal) return this._getRemoteCpu();
+    if (!this.spark.isLocal) {
+      if (this.spark.kind === "mac") return this._getRemoteMacCpu();
+      return this._getRemoteCpu();
+    }
     try {
       // Read /proc/stat once and compute usage BEFORE estimating power.
       // Previously _getCPUPower re-read /proc/stat in parallel with _getCPUUsage,
@@ -76,7 +82,10 @@ export class SystemCollector {
 
   /** Collect RAM metrics. */
   async collectRam() {
-    if (!this.spark.isLocal) return this._getRemoteRam();
+    if (!this.spark.isLocal) {
+      if (this.spark.kind === "mac") return this._getRemoteMacRam();
+      return this._getRemoteRam();
+    }
     try {
       return await this._getRamUsage();
     } catch (err) {
@@ -87,7 +96,10 @@ export class SystemCollector {
 
   /** Collect storage metrics per mount. */
   async collectStorage() {
-    if (!this.spark.isLocal) return this._getRemoteStorage();
+    if (!this.spark.isLocal) {
+      if (this.spark.kind === "mac") return this._getRemoteMacStorage();
+      return this._getRemoteStorage();
+    }
     try {
       return await this._getDiskUsage();
     } catch (err) {
@@ -98,7 +110,10 @@ export class SystemCollector {
 
   /** Collect network metrics (interfaces, speeds). */
   async collectNetwork() {
-    if (!this.spark.isLocal) return this._getRemoteNetwork();
+    if (!this.spark.isLocal) {
+      if (this.spark.kind === "mac") return this._getRemoteMacNetwork();
+      return this._getRemoteNetwork();
+    }
     try {
       const interfaces = this._tagDisabledInterfaces(await this._getNetworkMetrics());
       let primaryInterface = await this._getDefaultNetworkInterface();
@@ -118,7 +133,12 @@ export class SystemCollector {
 
   /** Collect unified memory metrics. */
   async collectUnifiedMemory() {
-    if (!this.spark.isLocal) return this._getRemoteUnifiedMemory();
+    if (!this.spark.isLocal) {
+      // Apple Silicon Macs: unified memory is the RAM panel itself (no
+      // separate GPU pool). Skip this domain rather than running Linux cmds.
+      if (this.spark.kind === "mac") return this._defaultUnifiedMemory();
+      return this._getRemoteUnifiedMemory();
+    }
     try {
       return await this._getUnifiedMemory();
     } catch (err) {
@@ -1274,6 +1294,239 @@ export class SystemCollector {
     } catch (err) {
       console.error(`[SystemCollector] Remote Unified Memory error for ${this.spark.id}:`, err.message);
       return this._defaultUnifiedMemory();
+    }
+  }
+
+  // ─── macOS remote collectors (kind === "mac") ─────────────
+  // Apple Silicon Macs have no nvidia-smi and no /proc. These use BSD-native
+  // commands over SSH. GPU temps/util are not readable without sudo on macOS,
+  // so the GPU domain returns defaults and the UI hides GPU panels for macs.
+
+  async _getRemoteMacGpu() {
+    // No userland GPU metrics on macOS without sudo powermetrics.
+    return this._defaultGpu();
+  }
+
+  async _getRemoteMacCpu() {
+    try {
+      const cmd = [
+        "sysctl -n vm.loadavg",
+        "echo '---'",
+        "sysctl -n hw.ncpu",
+      ].join("; ");
+      const output = await sshExec(this.spark, cmd);
+      const sections = output.split("---");
+      const loadOut = (sections[0] || "").trim();
+      const ncpu = parseInt((sections[1] || "").trim(), 10) || 0;
+      // vm.loadavg → "{ 1.67 1.43 1.31 }" (1/5/15 min)
+      const m = loadOut.match(/[\d.]+/);
+      const load1 = m ? parseFloat(m[0]) : 0;
+      const usage = ncpu > 0 ? Math.min(100, Math.round((load1 / ncpu) * 100)) : 0;
+      // Apple Silicon power estimate (TDP ~40W class; idle ~3W). No RAPL on
+      // macOS without sudo — labeled estimate, same contract as Linux ARM path.
+      const tdp = 40;
+      const idleWatts = 3;
+      const draw = idleWatts + (tdp - idleWatts) * Math.min(usage / 100, 1);
+      return { usage, temperature: 0, draw: Math.round(draw * 10) / 10, tdp };
+    } catch (err) {
+      console.error(`[SystemCollector] Remote Mac CPU error for ${this.spark.id}:`, err.message);
+      return this._defaultCpu();
+    }
+  }
+
+  async _getRemoteMacRam() {
+    try {
+      const cmd = ["vm_stat", "echo '---'", "sysctl -n hw.memsize"].join("; ");
+      const output = await sshExec(this.spark, cmd);
+      const sections = output.split("---");
+      const vmOut = sections[0] || "";
+      const totalBytes = parseInt((sections[1] || "").trim(), 10) || 0;
+      const psMatch = vmOut.match(/page size of (\d+) bytes/);
+      const pageSize = psMatch ? parseInt(psMatch[1], 10) : 16384;
+      const pages = (name) => {
+        const r = vmOut.match(new RegExp(`${name}:\\s+(\\d+)`));
+        return r ? parseInt(r[1], 10) : 0;
+      };
+      // Available = free + inactive + speculative + purgeable (matches
+      // `memory_pressure` free-pages accounting). Used = total − available.
+      const availBytes =
+        (pages("Pages free") +
+          pages("Pages inactive") +
+          pages("Pages speculative") +
+          pages("Pages purgeable")) *
+        pageSize;
+      const usedBytes = Math.max(0, totalBytes - availBytes);
+      const totalMB = Math.round(totalBytes / 1024 / 1024);
+      const usedMB = Math.round(usedBytes / 1024 / 1024);
+      return {
+        used: usedMB,
+        total: totalMB,
+        percentage: totalMB > 0 ? Math.round((usedMB / totalMB) * 100) : 0,
+      };
+    } catch (err) {
+      console.error(`[SystemCollector] Remote Mac RAM error for ${this.spark.id}:`, err.message);
+      return this._defaultRam();
+    }
+  }
+
+  async _getRemoteMacStorage() {
+    try {
+      const output = await sshExec(this.spark, "df -k -l");
+      const lines = output.trim().split("\n").slice(1); // skip header
+      const disks = [];
+      const disabledDevices = this.spark.disabledDevices || [];
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        // Filesystem 1024-blocks Used Available Capacity iused ifree %iused Mounted-on
+        if (parts.length < 9) continue;
+        const [fsys, size, used, avail, pct, , , , ...mountParts] = parts;
+        const mount = mountParts.join(" ");
+        // APFS: keep only the real user-visible volumes; VM/Preboot/Update/
+        // xarts/FIRCLinks etc. are internal slices of the same container.
+        if (mount !== "/" && mount !== "/System/Volumes/Data") continue;
+        const device = fsys.replace(/^\/dev\//, "");
+        const label = mount === "/System/Volumes/Data" ? "/ (Data)" : "/";
+        const isDisabled =
+          disabledDevices.includes(device) || disabledDevices.includes(mount);
+        disks.push({
+          device,
+          label,
+          used: Math.round(parseInt(used) / 1024), // KB → MB
+          total: Math.round(parseInt(size) / 1024),
+          available: Math.round(parseInt(avail) / 1024),
+          percentage: parseInt(pct) || 0,
+          readSpeed: 0,
+          writeSpeed: 0,
+          disabled: isDisabled,
+        });
+      }
+      return disks;
+    } catch (err) {
+      console.error(`[SystemCollector] Remote Mac Storage error for ${this.spark.id}:`, err.message);
+      return [];
+    }
+  }
+
+  async _getRemoteMacNetwork() {
+    try {
+      const cmd = [
+        "netstat -ibn",
+        "echo '---'",
+        "route -n get default 2>/dev/null | awk '/interface:/{print $2}'",
+        "echo '---'",
+        // per-iface status + IPv4 + ether MAC in one pass
+        'for i in $(netstat -ibn | awk \'/<Link/{print $1}\' | sort -u); do ' +
+          'echo "$i|$(ifconfig $i 2>/dev/null | awk \'/status:/{print $2}\')|$(ipconfig getifaddr $i 2>/dev/null)|$(ifconfig $i 2>/dev/null | awk \'/ether/{print $2}\')"; ' +
+          "done",
+      ].join("; ");
+      const output = await sshExec(this.spark, cmd);
+      const sections = output.split("---");
+      const netstatOut = sections[0] || "";
+      const primaryInterface = (sections[1] || "").trim() || null;
+      const ifaceOut = sections[2] || "";
+
+      // Per-iface metadata from the loop: name|status|ip|mac
+      const meta = new Map();
+      for (const line of ifaceOut.split("\n")) {
+        const [name, status, ip, mac] = line.split("|");
+        if (!name) continue;
+        meta.set(name.trim(), {
+          status: (status || "").trim() || "unknown",
+          ip: (ip || "").trim() || null,
+          mac: (mac || "").trim() || null,
+        });
+      }
+
+      // Byte counters from netstat -ibn Link rows. Column count varies (MAC
+      // present or not), so index from the right: …Ibytes Opkts Oerrs Obytes Coll.
+      const now = Date.now();
+      const interfaces = [];
+      let wolMac = null;
+      for (const line of netstatOut.split("\n")) {
+        const parts = line.trim().split(/\s+/);
+        if (parts.length < 9 || !line.includes("<Link")) continue;
+        const iface = parts[0];
+        // Skip virtual/loopback; keep en* (+utun tailscale is virtual too).
+        if (!/^en\d/.test(iface)) continue;
+        const rxBytes = parseInt(parts[parts.length - 5], 10) || 0;
+        const txBytes = parseInt(parts[parts.length - 2], 10) || 0;
+        const last = this.lastNetworkStats.get(iface) || { rxBytes, txBytes, time: now };
+        const dtSec = (now - last.time) / 1000;
+        const rxSpeed = dtSec > 0 ? (rxBytes - last.rxBytes) / dtSec : 0;
+        const txSpeed = dtSec > 0 ? (txBytes - last.txBytes) / dtSec : 0;
+        this.lastNetworkStats.set(iface, { rxBytes, txBytes, time: now });
+        const m = meta.get(iface) || {};
+        interfaces.push({
+          name: iface,
+          rxSpeed: Math.max(0, Math.round(rxSpeed)),
+          txSpeed: Math.max(0, Math.round(txSpeed)),
+          ip: m.ip || null,
+          operstate: m.status === "active" ? "up" : m.status || "unknown",
+          disabled: false,
+        });
+        if (iface === primaryInterface && m.mac) wolMac = normalizeMac(m.mac);
+      }
+
+      const tagged = this._tagDisabledInterfaces(interfaces);
+
+      // Link speed of the primary interface (best effort, e.g. "1000baseT").
+      let linkSpeedMbps = null;
+      if (primaryInterface && /^[a-zA-Z0-9._-]+$/.test(primaryInterface)) {
+        try {
+          const media = await sshExec(
+            this.spark,
+            `networksetup -getMedia ${primaryInterface} 2>/dev/null || true`
+          );
+          const mm = String(media).match(/(\d+)\s*(G|M)?base/i);
+          if (mm) {
+            const n = parseInt(mm[1], 10);
+            const unit = (mm[2] || "G").toUpperCase();
+            linkSpeedMbps = unit === "G" ? n * 1000 : n;
+          }
+        } catch {
+          /* link speed optional */
+        }
+      }
+
+      return { primaryInterface, linkSpeedMbps, interfaces: tagged, wolMac };
+    } catch (err) {
+      console.error(`[SystemCollector] Remote Mac Network error for ${this.spark.id}:`, err.message);
+      return this._defaultNetwork();
+    }
+  }
+
+  /**
+   * One-shot hardware detection for kind === "mac" units (Apple Silicon via
+   * sysctl). Returns null on any failure → caller keeps static fallback.
+   * @returns {Promise<object|null>}
+   */
+  async detectMacHardware() {
+    try {
+      const out = await sshExec(this.spark, [
+        "sysctl -n machdep.cpu.brand_string",
+        "echo '---'",
+        "sysctl -n hw.ncpu",
+        "echo '---'",
+        "sysctl -n hw.memsize",
+        "echo '---'",
+        "sw_vers -productVersion",
+      ].join("; "));
+      const parts = out.split("---");
+      const cpuModel = (parts[0] || "").trim() || null;
+      const cpuCores = parseInt((parts[1] || "").trim(), 10) || null;
+      const memBytes = parseInt((parts[2] || "").trim(), 10) || 0;
+      const totalMemoryGB = memBytes > 0 ? Math.round(memBytes / 1024 / 1024 / 1024) : null;
+      return {
+        device: "Apple Silicon Mac",
+        cpuModel,
+        cpuCores,
+        totalMemoryGB,
+        gpuChip: cpuModel, // integrated GPU = same SoC
+        cudaDriver: null,
+        storageModel: null,
+      };
+    } catch {
+      return null;
     }
   }
 

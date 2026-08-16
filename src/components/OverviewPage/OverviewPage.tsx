@@ -87,6 +87,7 @@ function SparkCard({
   const gpu = spark.metrics.gpu;
   const um = spark.metrics.unifiedMemory;
   const online = spark.online;
+  const isMac = spark.kind === "mac";
 
   const usage = gpu?.usage ?? 0;
   const tempRaw = gpu?.temperature ?? 0;
@@ -198,6 +199,57 @@ function SparkCard({
             {online ? "Waiting for metrics…" : "Host unreachable"}
           </span>
         </div>
+      ) : isMac ? (
+        (() => {
+          // Apple Silicon Macs: no GPU metrics — headline is RAM + CPU usage.
+          const ram = spark.metrics.ram;
+          const rUsed = ram?.used ?? 0;
+          const rTotal = ram?.total ?? 0;
+          const rPct = rTotal > 0 ? Math.round((rUsed / rTotal) * 100) : 0;
+          const macRamBarColor = rPct > 85 ? "bg-danger" : rPct > 60 ? "bg-warning" : "bg-accent";
+          const cpuUsage = spark.metrics.cpu?.usage ?? 0;
+          const macCpuBarColor = cpuUsage > 85 ? "bg-danger" : cpuUsage > 60 ? "bg-warning" : "bg-accent";
+          return (
+            <>
+              <div className="flex flex-col gap-3.5">
+                <MetricBar
+                  label="RAM"
+                  value={rUsed}
+                  max={rTotal}
+                  color={macRamBarColor}
+                  caption={rTotal > 0 ? `${fmtStorage(rUsed, false)} / ${fmtStorage(rTotal, true)}` : "—"}
+                />
+                <MetricBar
+                  label="CPU"
+                  value={cpuUsage}
+                  max={100}
+                  color={macCpuBarColor}
+                  caption={`${cpuUsage}%`}
+                />
+              </div>
+              <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-2.5 border-t border-border pt-3.5">
+                <MiniStat label="CPU Power" value={`est. ${spark.metrics.cpu?.draw ?? 0}W`} />
+                {(() => {
+                  // Prefer the Data volume (real user data) over the read-only system snapshot "/".
+                  const rootDisk =
+                    spark.metrics.storage.find((d) => d.label === "/ (Data)") ??
+                    spark.metrics.storage.find((d) => d.label === "/");
+                  if (rootDisk) {
+                    return (
+                      <MiniStat
+                        label="Storage"
+                        value={`${fmtStorage(rootDisk.used, false)} / ${fmtStorage(rootDisk.total, true)}`}
+                        tone={rootDisk.percentage > 85 ? "danger" : rootDisk.percentage > 60 ? "warning" : "default"}
+                        bold={false}
+                      />
+                    );
+                  }
+                  return null;
+                })()}
+              </div>
+            </>
+          );
+        })()
       ) : (
         <>
           {/* Three headline bars: GPU alloc, Temp, Usage */}

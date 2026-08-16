@@ -104,6 +104,14 @@ export class SparkMonitor {
           this._hardwareSummary = { ...this._hardwareSummary, ...detected };
         })
         .catch(() => {});
+    } else if (spark?.kind === "mac") {
+      void this.collector
+        .detectMacHardware()
+        .then((detected) => {
+          if (this._stopped || !detected) return;
+          this._hardwareSummary = { ...this._hardwareSummary, ...detected };
+        })
+        .catch(() => {});
     }
 
     // Timers
@@ -384,6 +392,16 @@ export class SparkMonitor {
     if (this.spark.isLocal) {
       const mapped = path.join(HOST_PATHS.PROC, "uptime");
       content = fs.readFileSync(mapped, "utf8");
+    } else if (this.spark.kind === "mac") {
+      // kern.boottime → "{ sec = 1784734911, usec = 523192 } …"
+      const out = await sshExec(this.spark, "sysctl -n kern.boottime; date +%s");
+      const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
+      const secMatch = (lines[0] || "").match(/sec\s*=\s*(\d+)/);
+      const nowSec = parseInt(lines[lines.length - 1] || "", 10);
+      if (secMatch && Number.isFinite(nowSec)) {
+        return Math.max(0, nowSec - parseInt(secMatch[1], 10));
+      }
+      return null;
     } else {
       content = await sshExec(this.spark, "cat /proc/uptime");
     }
@@ -686,6 +704,17 @@ export class SparkMonitor {
     if (spark?.kind === "host") {
       return {
         device: "Linux GPU host",
+        cpuModel: null,
+        cpuCores: null,
+        totalMemoryGB: null,
+        gpuChip: null,
+        cudaDriver: null,
+        storageModel: null,
+      };
+    }
+    if (spark?.kind === "mac") {
+      return {
+        device: "Apple Silicon Mac",
         cpuModel: null,
         cpuCores: null,
         totalMemoryGB: null,

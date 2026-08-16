@@ -481,8 +481,8 @@ export class SparkRegistry {
     return {
       id: config.id,
       name: config.name || config.id,
-      /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
-      kind: config.kind === "host" ? "host" : "spark",
+      /** Unit type: spark (DGX Spark), host (dedicated GPU Linux box), or mac (Apple Silicon). */
+      kind: config.kind === "host" ? "host" : config.kind === "mac" ? "mac" : "spark",
       lanIp: config.lanIp || "",
       cx7Ip: config.cx7Ip || null,
       /** Optional user override for Wake-on-LAN. Empty → use detectedMacAddress. */

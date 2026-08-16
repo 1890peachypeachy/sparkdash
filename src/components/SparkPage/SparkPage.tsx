@@ -6,6 +6,7 @@ import { SparkHeader } from "./SparkHeader";
 import { SparkActions } from "./SparkActions";
 import { GpuPanel } from "./GpuPanel";
 import { RamPanel } from "./RamPanel";
+import { CpuPanel } from "./CpuPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { LlmPanel } from "./LlmPanel";
@@ -227,7 +228,27 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
         />
         {resourcesOpen && (
           <>
-            {spark.kind === "host" ? (
+            {spark.kind === "mac" ? (
+              /* Macs: no nvidia-smi — CPU + RAM span the left column; Storage → Network on the right */
+              <>
+                <CpuPanel cpu={metrics.cpu} sparkId={spark.id} className="md:row-span-2" />
+                <RamPanel ram={metrics.ram} sparkId={spark.id} className="md:row-span-1" />
+                <StoragePanel
+                  storage={metrics.storage}
+                  sparkId={spark.id}
+                  disabledDevices={disabledDevices}
+                  onDisabledChange={setDisabledDevices}
+                  storagePollDisabled={storagePollDisabled}
+                  onStoragePollModeChange={handleStoragePollModeChange}
+                />
+                <NetworkPanel
+                  network={metrics.network}
+                  sparkId={spark.id}
+                  disabledInterfaces={disabledInterfaces}
+                  onDisabledChange={setDisabledInterfaces}
+                />
+              </>
+            ) : spark.kind === "host" ? (
               /* Hosts: GPU spans the full left column; RAM → Network → Storage stack in the right column */
               <>
                 <GpuPanel

@@ -8,7 +8,7 @@ export interface SparkConfig {
    * - host: any Linux box with an NVIDIA GPU (still monitored via nvidia-smi,
    *   just not a Spark). Real hardware is auto-detected once online.
    */
-  kind?: "spark" | "host";
+  kind?: "spark" | "host" | "mac";
   lanIp: string;
   cx7Ip?: string | null;
   /**
@@ -415,7 +415,7 @@ export interface SparkSnapshot {
   id: string;
   name: string;
   /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
-  kind?: "spark" | "host";
+  kind?: "spark" | "host" | "mac";
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;

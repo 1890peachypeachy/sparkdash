@@ -153,6 +153,7 @@ export function AddSparkDialog({ open, onClose, onAdded, defaultLlmPort = 8888 }
             >
               <option value="spark">NVIDIA DGX Spark</option>
               <option value="host">Dedicated GPU host (Linux, nvidia-smi, not a Spark)</option>
+              <option value="mac">Apple Silicon Mac (no GPU panel, CPU/RAM/storage)</option>
             </select>
           </div>
 
