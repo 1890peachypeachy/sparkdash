@@ -236,7 +236,12 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
                   temperatureUnit={temperatureUnit}
                   className="md:row-span-3"
                 />
-                <RamPanel ram={metrics.ram} sparkId={spark.id} />
+                <RamPanel
+                  ram={metrics.ram}
+                  cpu={metrics.cpu}
+                  sparkId={spark.id}
+                  temperatureUnit={temperatureUnit}
+                />
                 <NetworkPanel
                   network={metrics.network}
                   sparkId={spark.id}
