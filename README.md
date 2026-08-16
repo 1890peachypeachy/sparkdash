@@ -231,7 +231,7 @@ If the key file has a non-default name (e.g. `id_ed25519_shared`), mount it **as
 Design principle: **one Spark model, N instances**. Every unit is a record in `config/sparks.json` with a `kind` field (`spark` or `host`). The same `SparkMonitor`, `SystemCollector`, and `LlmProbe` code runs for all of them. Adding a unit is a config change, not a code change.
 
 ```txt
-┌────────────────────── Docker container (sparkDash) ──────────────────────┐
+┌────────────────────── Docker container (sparkDash) ────────────────────────┐
 │  Express (server/)                                                         │
 │  ├─ config/sparks.json        Spark registry (API read/write)              │
 │  ├─ SparkRegistry             load/persist Sparks; change events           │
@@ -343,7 +343,7 @@ Copy `.env.example` to `.env` if needed:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BIND_HOST` | `0.0.0.0` | HTTP and WebSocket listen address |
+| `BIND_HOST` | `127.0.0.1` | HTTP and WebSocket listen address. Loopback by default — the dashboard exposes SSH + power controls, so set a LAN IP (or `0.0.0.0`) to allow remote access. |
 | `PORT` | `5555` | HTTP + WebSocket listen port |
 | `LLM_PORT` | `8888` | Default LLM probe port |
 | `COMFY_PORT` | `8188` | Default ComfyUI probe port |
@@ -363,8 +363,11 @@ Copy `.env.example` to `.env` if needed:
 | `HOST_ROOT_PATH` | `/host/root` | Host root mount |
 | `SSH_IDENTITY_FILE` | _(unset)_ | Path **inside the process** to a private key (`ssh -i`). Use when the bind-mount is not a default OpenSSH name. |
 
-> When using Docker's default bridge network, keep `BIND_HOST=0.0.0.0`.  
-> With `network_mode: host`, use `BIND_HOST=127.0.0.1` to restrict access to the local host or a reverse proxy.
+> The listener defaults to `127.0.0.1` (loopback) so the dashboard — which can SSH into and
+> power off your Sparks — isn't reachable on the LAN by default. Set `BIND_HOST` to the host's
+> LAN IP (or `0.0.0.0`) to reach it from another machine. The provided `docker-compose.yml`
+> (`network_mode: host`) sets `BIND_HOST=0.0.0.0` explicitly; restrict access at the network
+> layer, or set `127.0.0.1` when running behind a reverse proxy.
 
 ### Adding a unit
 
