@@ -8,6 +8,7 @@ import { GpuPanel } from "./GpuPanel";
 import { RamPanel } from "./RamPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
+import { TailscalePanel } from "./TailscalePanel";
 import { LlmPanel } from "./LlmPanel";
 import { ComfyPanel } from "./ComfyPanel";
 import { ChevronDownIcon } from "../ui/icons";
@@ -175,6 +176,7 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
 
   const llmOn = isLlmMonitoringEnabled(spark);
   const comfyOn = Boolean(spark.comfyMonitoring);
+  const tailscaleOn = Boolean(spark.tailscaleMonitoring);
   /** First LLM + Comfy share a row when both are on. */
   const primarySideBySide = llmOn && comfyOn;
   const showServices = llmOn || comfyOn;
@@ -228,13 +230,13 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
         {resourcesOpen && (
           <>
             {spark.kind === "host" ? (
-              /* Hosts: GPU spans the full left column; RAM → Network → Storage stack in the right column */
+              /* Hosts: GPU spans the full left column; RAM → Network → Storage [→ Tailnet] stack in the right column */
               <>
                 <GpuPanel
                   gpu={metrics.gpu}
                   sparkId={spark.id}
                   temperatureUnit={temperatureUnit}
-                  className="md:row-span-3"
+                  className={tailscaleOn ? "md:row-span-4" : "md:row-span-3"}
                 />
                 <RamPanel
                   ram={metrics.ram}
@@ -256,15 +258,16 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
                   storagePollDisabled={storagePollDisabled}
                   onStoragePollModeChange={handleStoragePollModeChange}
                 />
+                {tailscaleOn && <TailscalePanel tailscale={metrics.tailscale ?? null} />}
               </>
             ) : (
-              /* Resources layout: GPU spans the full left column; Storage + Network stack in the right column */
+              /* Resources layout: GPU spans the full left column; Storage + Network [+ Tailnet] stack in the right column */
               <>
                 <GpuPanel
                   gpu={metrics.gpu}
                   sparkId={spark.id}
                   temperatureUnit={temperatureUnit}
-                  className="md:row-span-2"
+                  className={tailscaleOn ? "md:row-span-3" : "md:row-span-2"}
                 />
                 <StoragePanel
                   storage={metrics.storage}
@@ -280,6 +283,7 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
                   disabledInterfaces={disabledInterfaces}
                   onDisabledChange={setDisabledInterfaces}
                 />
+                {tailscaleOn && <TailscalePanel tailscale={metrics.tailscale ?? null} />}
               </>
             )}
           </>
