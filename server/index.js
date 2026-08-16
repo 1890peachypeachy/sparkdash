@@ -19,6 +19,7 @@ import {
 } from "./collectors/DecodeBench.js";
 import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
+import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 
 dotenv.config();
@@ -751,6 +752,26 @@ app.put("/api/sparks/:id/llm-ports/:port/api-key", (req, res) => {
 });
 
 /**
+ * Daily decode / prefill tok/s rollups (busy samples, last 14 UTC days by default).
+ * Query: port (required for multi-port), days (1–30).
+ */
+app.get("/api/sparks/:id/llm/daily", (req, res) => {
+  const spark = registry.getSpark(req.params.id);
+  if (!spark) return res.status(404).json({ error: "Spark not found" });
+  const ports =
+    Array.isArray(spark.llmPorts) && spark.llmPorts.length
+      ? spark.llmPorts
+      : [resolveLlmPort(spark)];
+  let port = req.query.port != null ? Number(req.query.port) : ports[0];
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    return res.status(400).json({ error: "Invalid port" });
+  }
+  let days = req.query.days != null ? Number(req.query.days) : 14;
+  if (!Number.isFinite(days)) days = 14;
+  res.json(llmDaily.getSeries(spark.id, port, { days }));
+});
+
+/**
  * Decode throughput benchmark (streaming, post-first-token tok/s).
  *
  * POST body: { port?, concurrencies: number[], maxTokens? }
@@ -1365,6 +1386,11 @@ function shutdown(signal) {
     );
   } catch (err) {
     console.error("[sparkDash] failed to finalize benchmarks:", err.message);
+  }
+  try {
+    llmDaily.flush();
+  } catch (err) {
+    console.error("[sparkDash] failed to flush LLM daily history:", err.message);
   }
   try {
     if (broadcastTimer) {

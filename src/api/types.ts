@@ -287,6 +287,10 @@ export interface LlmMetrics {
   slotsTotal: number;
   generationTps: number;
   prefillTps: number;
+  /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
+  cachedPrefillTps?: number | null;
+  /** Live uncached/computed prefill tok/s when split is available. */
+  uncachedPrefillTps?: number | null;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
   totalOutputTokens: number;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
@@ -314,6 +318,25 @@ export interface LlmMetrics {
    */
   posture?: LlmPosture | null;
   error: string | null;
+}
+
+/** One UTC day of busy tok/s rollups (null avg = no busy samples). */
+export interface LlmDailyDay {
+  date: string;
+  decodeMax: number;
+  decodeAvg: number | null;
+  prefillMax: number;
+  prefillAvg: number | null;
+  cachedPrefillMax: number | null;
+  cachedPrefillAvg: number | null;
+  uncachedPrefillMax: number | null;
+  uncachedPrefillAvg: number | null;
+}
+
+export interface LlmDailyResponse {
+  sparkId: string;
+  port: number;
+  days: LlmDailyDay[];
 }
 
 /** Security posture badge payload from LlmProbe. */

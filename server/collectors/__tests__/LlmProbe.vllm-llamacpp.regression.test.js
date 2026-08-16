@@ -264,6 +264,70 @@ test("llama.cpp probe: slot deltas → tok/s; props for model", async () => {
   assert.equal(snap.prefillTps, 10); // (25-5)/2
   assert.equal(snap.totalOutputTokens, 50);
   assert.equal(snap.available, true);
+  assert.equal(snap.cachedPrefillTps, null);
+  assert.equal(snap.uncachedPrefillTps, null);
+});
+
+test("llama.cpp probe: n_prompt_tokens_cache → cached vs uncached prefill", async () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8080);
+  probe.serverIsOpenAI = false;
+  probe.backendType = "llama.cpp";
+  probe.authOpen = true;
+  probe._lastDetectAt = Date.now();
+  probe.lastProbeTime = Date.now() - 2000;
+  probe.slotState.set(0, { decoded: 10, prompted: 5 });
+  probe.lastPrefillKinds = { cached: 10, computed: 5 };
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/slots")) {
+      return jsonRes([
+        {
+          id: 0,
+          n_decoded: 50,
+          n_prompt_tokens_processed: 25,
+          n_prompt_tokens_cache: 40,
+          is_processing: true,
+        },
+      ]);
+    }
+    if (u.endsWith("/props")) return jsonRes({ model_alias: "m" });
+    return jsonRes({}, 404);
+  };
+  const snap = await probe.probe();
+  assert.equal(snap.prefillTps, 10); // processed (25-5)/2
+  assert.equal(snap.uncachedPrefillTps, 10); // (25-5)/2
+  assert.equal(snap.cachedPrefillTps, 15); // (40-10)/2
+});
+
+test("llama.cpp: n_prompt_tokens_processed 0 is not treated as missing", async () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8080);
+  probe.serverIsOpenAI = false;
+  probe.backendType = "llama.cpp";
+  probe.authOpen = true;
+  probe._lastDetectAt = Date.now();
+  probe.lastProbeTime = Date.now() - 2000;
+  probe.slotState.set(0, { decoded: 10, prompted: 0 });
+  probe.lastPrefillKinds = { cached: 10, computed: 0 };
+  probe._fetch = async (url) => {
+    const u = String(url);
+    if (u.endsWith("/slots")) {
+      return jsonRes([
+        {
+          id: 0,
+          n_decoded: 10,
+          n_prompt_tokens_processed: 0,
+          n_prompt_tokens: 100,
+          n_prompt_tokens_cache: 100,
+          state: "idle",
+        },
+      ]);
+    }
+    if (u.endsWith("/props")) return jsonRes({ model_alias: "m" });
+    return jsonRes({}, 404);
+  };
+  const snap = await probe.probe();
+  assert.equal(snap.uncachedPrefillTps, 0);
+  assert.equal(snap.cachedPrefillTps, 45); // (100-10)/2
 });
 
 test("llama.cpp idle: unchanged slot counters → 0 tok/s", async () => {

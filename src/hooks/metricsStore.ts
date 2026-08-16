@@ -108,6 +108,12 @@ export function ingestSnapshots(sparks: SparkSnapshot[]): void {
         const portKey = port != null ? `:${port}` : `:${i}`;
         pushHistory(`${s.id}:llm${portKey}.tps`, llm.generationTps);
         pushHistory(`${s.id}:llm${portKey}.prefill`, llm.prefillTps);
+        if (llm.cachedPrefillTps != null) {
+          pushHistory(`${s.id}:llm${portKey}.prefillCached`, llm.cachedPrefillTps);
+        }
+        if (llm.uncachedPrefillTps != null) {
+          pushHistory(`${s.id}:llm${portKey}.prefillUncached`, llm.uncachedPrefillTps);
+        }
       }
     }
     if (m.comfy?.available) {

@@ -7,6 +7,21 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.1] — 2026-08-16
+
+### Added
+- **Daily LLM tok/s history** — busy-sample rollups (peak + mean) for decode and prefill, persisted in `config/llm-daily.json` (30 UTC days). 14-day peak chart on the LLM card; `GET /api/sparks/:id/llm/daily`.
+- **Cached vs uncached prefill tok/s** — live rows when the backend splits kinds: ds4 labeled prefill counters, llama.cpp `/slots` `n_prompt_tokens_cache`, SGLang `sglang:cached_tokens_total` (L1 `cache_source="device"`). Combined Prefill stays computed/uncached. vLLM is unchanged (combined prefill + prefix-cache hit rate).
+
+### Changed
+- **Docker SSH key auth** — compose comments + README: key auth runs inside the container (`/root/.ssh`), not the host user’s `~/.ssh`. Custom-named keys must be mounted as `id_ed25519` (or set `SSH_IDENTITY_FILE`). LAN IPs are from the sparkDash host. Add/Edit Spark hint when auth is Key.
+
+### Fixed
+- SGLang `/metrics` no longer overwrites `/get_server_info` tok/s when both are present.
+- llama.cpp `n_prompt_tokens_processed: 0` is not treated as missing (fully cached prompts).
+
+---
+
 ## [1.8.0] — 2026-08-15
 
 ### Added

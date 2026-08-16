@@ -76,11 +76,17 @@ export class LlmProbe {
     this.slotsTotal = 0;
     this.generationTps = 0;
     this.prefillTps = 0;
+    /** Live cached-prefill tok/s when the backend splits kinds (ds4 / llama.cpp / sglang). null otherwise. */
+    this.cachedPrefillTps = null;
+    /** Live uncached/computed prefill tok/s when split is available. null otherwise. */
+    this.uncachedPrefillTps = null;
     this.error = null;
 
     // Per-slot rate tracking (for llama.cpp native path)
     this.slotState = new Map();
     this.lastTokenCounts = { input: 0, output: 0 };
+    /** Previous prefill counters by kind; null until first labeled sample. */
+    this.lastPrefillKinds = null;
     /** Previous vLLM TTFT histogram `_sum` (seconds). null until first sample. */
     this.lastTtftSum = null;
     /** Previous `vllm:iteration_tokens_total_sum` (engine-step tokens). */
@@ -122,6 +128,38 @@ export class LlmProbe {
     const rounded = Math.max(0, Math.round(rate * 100) / 100);
     if (rounded > 0) this.prefillTps = rounded;
     else if (!inflight) this.prefillTps = 0;
+  }
+
+  /**
+   * Live cached vs computed prefill tok/s from cumulative counters.
+   * First sample seeds the baseline (0 tok/s). Missing either side clears the split.
+   * @param {number|null|undefined} cachedCount
+   * @param {number|null|undefined} computedCount
+   * @param {number} dtSec
+   */
+  _setPrefillSplitRates(cachedCount, computedCount, dtSec) {
+    if (cachedCount == null || computedCount == null || !Number.isFinite(cachedCount) || !Number.isFinite(computedCount)) {
+      this.cachedPrefillTps = null;
+      this.uncachedPrefillTps = null;
+      this.lastPrefillKinds = null;
+      return;
+    }
+    const total = cachedCount + computedCount;
+    this.prefixCacheHitRate =
+      total > 0 ? Math.round((cachedCount / total) * 10000) / 10000 : null;
+    if (this.lastPrefillKinds == null) {
+      this.lastPrefillKinds = { cached: cachedCount, computed: computedCount };
+      this.cachedPrefillTps = 0;
+      this.uncachedPrefillTps = 0;
+      return;
+    }
+    if (dtSec > 0 && dtSec < 10) {
+      const dCached = cachedCount - this.lastPrefillKinds.cached;
+      const dComputed = computedCount - this.lastPrefillKinds.computed;
+      this.cachedPrefillTps = Math.max(0, Math.round((dCached / dtSec) * 100) / 100);
+      this.uncachedPrefillTps = Math.max(0, Math.round((dComputed / dtSec) * 100) / 100);
+    }
+    this.lastPrefillKinds = { cached: cachedCount, computed: computedCount };
   }
 
   /** Update probe port (and host from spark). Resets detection when the target changes. */
@@ -190,6 +228,8 @@ export class LlmProbe {
     this.modelPath = null;
     this.generationTps = 0;
     this.prefillTps = 0;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
     this.contextLength = null;
     this.gpuMemoryUtilization = null;
     this.slotsActive = 0;
@@ -206,6 +246,7 @@ export class LlmProbe {
     this.mtpAcceptanceRate = null;
     this.slotState.clear();
     this.lastTokenCounts = { input: 0, output: 0 };
+    this.lastPrefillKinds = null;
     this.lastTtftSum = null;
     this.lastIterSum = null;
     this._sglangStickyTps = null;
@@ -381,16 +422,18 @@ export class LlmProbe {
     }
 
     if (this.backendType === "sglang") {
-      // Optional Prometheus path when launched with --enable-metrics
-      if (this.generationTps === 0 && this.prefillTps === 0) {
-        try {
-          const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
-          if (metricsRes.ok) {
-            this._applySglangMetrics(await metricsRes.text(), dtSec);
-          }
-        } catch {
-          /* metrics optional */
+      // Prometheus is optional (--enable-metrics). Do not mix those counters
+      // into lastTokenCounts when /get_server_info already produced live rates.
+      try {
+        const metricsRes = await this._fetch(`${this.baseUrl}/metrics`);
+        if (metricsRes.ok) {
+          const txt = await metricsRes.text();
+          const idle = this.generationTps === 0 && this.prefillTps === 0;
+          if (idle) this._applySglangMetrics(txt, dtSec);
+          else this._applySglangPrefillSplit(txt, dtSec);
         }
+      } catch {
+        /* metrics optional */
       }
       await this._enrichSglangModelInfo();
       return this._getSnapshot();
@@ -484,7 +527,7 @@ export class LlmProbe {
     this.mtpAcceptanceRate =
       specAccept != null ? Math.round(specAccept * 10000) / 10000 : null;
 
-    // Prefix-cache hit rate from prefill kind labels (cached / (computed+cached))
+    // Prefix-cache hit rate + live tok/s from prefill kind labels
     const cached = this._getPromMetricLabeled(
       txt,
       "ds4_tokens_prefilled_total",
@@ -497,13 +540,7 @@ export class LlmProbe {
       "kind",
       "computed"
     );
-    if (cached != null && computed != null) {
-      const total = cached + computed;
-      this.prefixCacheHitRate =
-        total > 0 ? Math.round((cached / total) * 10000) / 10000 : null;
-    } else {
-      this.prefixCacheHitRate = null;
-    }
+    this._setPrefillSplitRates(cached, computed, dtSec);
 
     // Clear tiles that are vLLM-histogram-specific (no ds4 equivalent yet)
     this.kvCacheUsage = null;
@@ -767,6 +804,34 @@ export class LlmProbe {
       this.requestsRunning = running;
       this.slotsActive = Math.round(running);
     }
+
+    const cached = this._sglangCachedTokens(txt);
+    if (cached != null && prompt != null) {
+      this._setPrefillSplitRates(cached, prompt, dtSec);
+    }
+  }
+
+  /**
+   * Cache split only — does not touch generation/prefill lastTokenCounts.
+   * Prefers cache_source="device" so HiCache L1/L2/L3 labels are not summed.
+   */
+  _applySglangPrefillSplit(txt, dtSec) {
+    const prompt =
+      this._getPromMetric(txt, "sglang:prompt_tokens_total") ??
+      this._getPromMetric(txt, "sglang_prompt_tokens_total");
+    const cached = this._sglangCachedTokens(txt);
+    if (cached != null && prompt != null) {
+      this._setPrefillSplitRates(cached, prompt, dtSec);
+    }
+  }
+
+  _sglangCachedTokens(txt) {
+    return (
+      this._getPromMetricLabeled(txt, "sglang:cached_tokens_total", "cache_source", "device") ??
+      this._getPromMetricLabeled(txt, "sglang_cached_tokens_total", "cache_source", "device") ??
+      this._getPromMetricMax(txt, "sglang:cached_tokens_total") ??
+      this._getPromMetricMax(txt, "sglang_cached_tokens_total")
+    );
   }
 
   /** Prefer SGLang /get_model_info (or /model_info) over raw HF cache paths. */
@@ -811,12 +876,21 @@ export class LlmProbe {
           let totalGen = 0;
           let totalPrefill = 0;
           let totalDecoded = 0;
+          let promptedSum = 0;
+          let cachedSum = 0;
+          let sawCache = false;
 
           for (const slot of slots) {
             const slotId = slot.id ?? "default";
             const decoded = this._getSlotDecoded(slot);
             const prompted = this._getSlotPrefilled(slot);
+            const cached = this._getSlotCached(slot);
             totalDecoded += decoded;
+            promptedSum += prompted;
+            if (cached != null) {
+              sawCache = true;
+              cachedSum += cached;
+            }
             const lastState = this.slotState.get(slotId) || { decoded: 0, prompted: 0 };
             const dDecoded = decoded - lastState.decoded;
             const dPrompted = prompted - lastState.prompted;
@@ -830,6 +904,7 @@ export class LlmProbe {
           this.totalOutputTokens = totalDecoded;
           this.generationTps = Math.max(0, Math.round(totalGen * 100) / 100);
           this._setPrefillTps(totalPrefill, totalGen > 0);
+          if (sawCache) this._setPrefillSplitRates(cachedSum, promptedSum, dtSec);
         }
       }
     } catch {}
@@ -879,6 +954,24 @@ export class LlmProbe {
       }
     }
     return found ? sum : null;
+  }
+
+  /**
+   * Max of Prometheus series matching `name` (avoids summing HiCache layers).
+   * @param {string} body
+   * @param {string} name
+   * @returns {number | null}
+   */
+  _getPromMetricMax(body, name) {
+    const esc = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const re = new RegExp(`^${esc}(?:\\{[^}]*\\})?\\s+([\\d.eE+-]+)\\s*$`, "gm");
+    let best = null;
+    let m;
+    while ((m = re.exec(body)) !== null) {
+      const v = parseFloat(m[1]);
+      if (Number.isFinite(v)) best = best == null ? v : Math.max(best, v);
+    }
+    return best;
   }
 
   /**
@@ -983,7 +1076,18 @@ export class LlmProbe {
   }
 
   _getSlotPrefilled(slot) {
-    return slot.n_prompt_tokens_processed || slot.n_prompt_tokens || 0;
+    if (slot?.n_prompt_tokens_processed != null) {
+      const n = Number(slot.n_prompt_tokens_processed);
+      if (Number.isFinite(n)) return n;
+    }
+    return slot?.n_prompt_tokens || 0;
+  }
+
+  /** Cached prompt tokens on a llama.cpp slot, or null when the field is absent. */
+  _getSlotCached(slot) {
+    if (slot == null || slot.n_prompt_tokens_cache == null) return null;
+    const n = Number(slot.n_prompt_tokens_cache);
+    return Number.isFinite(n) ? n : null;
   }
 
   /**
@@ -1059,6 +1163,8 @@ export class LlmProbe {
       slotsTotal: this.slotsTotal,
       generationTps: this.generationTps,
       prefillTps: this.prefillTps,
+      cachedPrefillTps: this.cachedPrefillTps,
+      uncachedPrefillTps: this.uncachedPrefillTps,
       totalOutputTokens: this.totalOutputTokens,
       kvCacheUsage: this.kvCacheUsage,
       requestsRunning: this.requestsRunning,
@@ -1086,6 +1192,8 @@ export class LlmProbe {
       slotsTotal: 0,
       generationTps: 0,
       prefillTps: 0,
+      cachedPrefillTps: null,
+      uncachedPrefillTps: null,
       totalOutputTokens: 0,
       kvCacheUsage: null,
       requestsRunning: null,

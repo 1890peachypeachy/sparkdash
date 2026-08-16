@@ -118,6 +118,8 @@ test("_applyDs4Metrics: gauges + counters + prefix hit rate", () => {
   probe._applyDs4Metrics(active, 2);
   assert.equal(probe.generationTps, 20); // (90-50)/2
   assert.equal(probe.prefillTps, 40); // computed only (180-100)/2
+  assert.equal(probe.uncachedPrefillTps, 40);
+  assert.equal(probe.cachedPrefillTps, 0);
 
   // Cached tokens jumping must not inflate prefill
   const cachedJump = active.replace(
@@ -126,6 +128,8 @@ test("_applyDs4Metrics: gauges + counters + prefix hit rate", () => {
   );
   probe._applyDs4Metrics(cachedJump, 2);
   assert.equal(probe.prefillTps, 0);
+  assert.equal(probe.uncachedPrefillTps, 0);
+  assert.equal(probe.cachedPrefillTps, 1350); // (3000-300)/2
 });
 
 test("probe: ds4 path reads context_length and does not mislabel as vllm", async () => {

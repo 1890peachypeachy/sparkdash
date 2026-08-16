@@ -50,16 +50,10 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ## Latest version changelog
 
-### Version 1.8.0 — Non-Spark units, prefill, and host RAM/VRAM
-- **Non-Spark unit support** — add a **dedicated GPU host** (kind `host`): any Linux box with an NVIDIA GPU, monitored via the same SSH + `nvidia-smi` collectors but **not** labeled as a DGX Spark. Hosts get a detected hardware summary (GPU model / driver / CPU / RAM) and separate **RAM** vs **VRAM** panels — VRAM is real discrete GPU memory from `nvidia-smi`, RAM is system memory from `/proc/meminfo`. On the unit page the Resources layout for hosts is **GPU in the left column** with **RAM → Network → Storage stacked in the right column** (Sparks keep their original layout). Overview cards add a RAM bar for hosts.
-- **Prefill tok/s next to decode** — live LLM panel sparkline, Overview cards as two columns (**tok/s** | **prefill**), decode-bench **Prefill** column (`prompt_tokens` ÷ TTFT)
-- **Live prefill** — vLLM engine-step tokens (including short prefills that share a poll with first decode); ds4 computed prefill diffs; 0 when idle. Shows while the engine is reading the prompt / building KV cache (send or regenerate), not when you only open a saved chat
-
-### Version 1.6.0 — ComfyUI monitoring & compact default
-- **ComfyUI** — opt-in per Spark (port 8188): live jobs, progress, last run, cancel, queue ETA, Open on LAN IP, model inventory
-- **Overview** — Comfy status chip (`idle` / `run` / `Nq`)
-- **Layout** — collapsible Resources / Services; LLM + Comfy side-by-side; multi-LLM row rules
-- **Compact UI** — default density (comfortable still in Settings)
+### Version 1.8.1 — Daily LLM history and Docker SSH keys
+- **Daily decode / prefill history** — 14-day peak tok/s on the LLM card (busy samples only), persisted in `config/llm-daily.json`
+- **Cached vs uncached prefill** — live rows on ds4, llama.cpp (`n_prompt_tokens_cache`), and SGLang (`--enable-metrics`); vLLM keeps combined prefill + prefix-cache hit rate
+- **Docker SSH key auth** — document bind-mounting a host key into `/root/.ssh` (or `SSH_IDENTITY_FILE`); IPs are from the sparkDash host, not the browser
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -73,7 +67,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Non-Spark GPU hosts** | Linux boxes with a dedicated NVIDIA GPU are first-class units: same `nvidia-smi` collectors over SSH, detected hardware summary, and separate **RAM** / **VRAM** panels. Detail page: GPU (left) + **RAM → Network → Storage** (right column); Overview cards show RAM and VRAM bars |
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
-| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live tok/s per server |
+| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live decode/prefill tok/s; cached vs uncached prefill on ds4, llama.cpp, and SGLang; **daily peak** history on the LLM card |
 | **ComfyUI** | Opt-in probe: queue/jobs, progress, cancel, Open link, inventory, overview chip |
 | **Hermes Agent** | Opt-in per unit: background update check (10 min), status badges, one-click or batch `hermes update` |
 | **Decode benchmark** | Multi-concurrency streaming decode tok/s (server + per-stream), persisted last run |
@@ -321,6 +315,7 @@ sparkDash/
 | POST | `/api/sparks/:id/llm-ports` | Add an LLM port (hot) |
 | DELETE | `/api/sparks/:id/llm-ports/:port` | Remove an LLM port (hot) |
 | PUT | `/api/sparks/:id/llm-port` | LLM port — backward-compat (hot) |
+| GET | `/api/sparks/:id/llm/daily` | Daily busy decode/prefill tok/s (`port`, `days`) |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
 | WS | `/ws` | Real-time metrics stream |

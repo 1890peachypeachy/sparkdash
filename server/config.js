@@ -15,6 +15,9 @@ const SPARKS_SECRETS_PATH =
 /** AES key file (auto-generated if SPARKDASH_SECRETS_KEY unset). */
 const SECRETS_KEY_PATH =
   process.env.SECRETS_KEY_PATH || path.join(ROOT, "config", ".secrets-key");
+/** Daily LLM tok/s rollups (gitignored). */
+const LLM_DAILY_JSON_PATH =
+  process.env.LLM_DAILY_JSON_PATH || path.join(ROOT, "config", "llm-daily.json");
 
 // ─── LLM / Comfy probe timeouts ──────────────────────────
 const LLM_PROBE_TIMEOUT_MS = 3000;
@@ -88,6 +91,7 @@ export {
   GPU_MEMORY_JSON_PATH,
   SPARKS_SECRETS_PATH,
   SECRETS_KEY_PATH,
+  LLM_DAILY_JSON_PATH,
   LLM_PROBE_TIMEOUT_MS,
   COMFY_PROBE_TIMEOUT_MS,
   SSH_CONNECT_TIMEOUT,
