@@ -222,6 +222,14 @@ For development with Docker (source-mounted, HMR):
 docker compose -f docker-compose.dev.yml up --build
 ```
 
+**Remote units + SSH keys (Docker):** SSH is executed *inside* the container on the sparkDash host (typically the head DGX). Configured LAN IPs are from **that** host’s point of view, not your laptop. OpenSSH looks for keys under `/root/.ssh` in the container — the host user’s `~/.ssh` is not used unless you bind-mount it. Uncomment this volume in `docker-compose.yml` (and recreate the container):
+
+```yaml
+- ${HOME}/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+```
+
+If the key file has a non-default name (e.g. `id_ed25519_shared`), mount it **as** `id_ed25519`, or set `SSH_IDENTITY_FILE` to the path inside the container. Keep the file mode `600`. The unit that runs sparkDash itself should be added with **This host (local collectors — no SSH for metrics)**.
+
 ---
 
 ## Architecture
@@ -358,6 +366,7 @@ Copy `.env.example` to `.env` if needed:
 | `HOST_PROC_PATH` | `/host/proc` | Host proc mount inside container |
 | `HOST_SYS_PATH` | `/host/sys` | Host sys mount |
 | `HOST_ROOT_PATH` | `/host/root` | Host root mount |
+| `SSH_IDENTITY_FILE` | _(unset)_ | Path **inside the process** to a private key (`ssh -i`). Use when the bind-mount is not a default OpenSSH name. |
 
 > When using Docker's default bridge network, keep `BIND_HOST=0.0.0.0`.  
 > With `network_mode: host`, use `BIND_HOST=127.0.0.1` to restrict access to the local host or a reverse proxy.
@@ -368,7 +377,7 @@ Copy `.env.example` to `.env` if needed:
 2. Choose **Unit type**:
    - **NVIDIA DGX Spark** — the default; hardware summary shows DGX Spark specs and the CX7 IP field is available.
    - **Dedicated GPU host** — any Linux machine with an NVIDIA GPU. It is monitored exactly like a Spark (SSH + `nvidia-smi`) but is **not** reported as a DGX Spark: the header shows a detected hardware summary (GPU model, CPU, RAM) instead of fixed GB10 specs, and the page shows separate **RAM** and **VRAM** panels (VRAM from `nvidia-smi`, RAM from system memory). On the unit page, RAM → Network → Storage stack in the right column with GPU filling the left column.
-3. Set **Name**, **LAN IP** (required), optional **CX7 IP** (Sparks only), **SSH user**, and auth (key or password). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
+3. Set **Name**, **LAN IP** (required), optional **CX7 IP** (Sparks only), **SSH user**, and auth (key or password). LAN IP is probed from the sparkDash host. Key auth in Docker needs a key mounted into the container (see Quick start). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
 4. **Test Connection** for SSH + LLM reachability.
 5. Save — a tab appears and metrics start streaming.
 
@@ -403,7 +412,7 @@ Choice is stored in `localStorage`.
 - Encryption key: `config/.secrets-key` (auto-generated) or `SPARKDASH_SECRETS_KEY`. **Do not delete the key file** or encrypted secrets become unreadable.
 - **Target validation** rejects clearly unsafe IPv4 targets (link-local `169.254.0.0/16`, `0.0.0.0/8`, multicast/reserved ≥ 224). Private, loopback, and public addresses are allowed so LAN and remote Sparks work.
 - SSH and HTTP probes use short timeouts (about 5 s SSH connect, 3 s HTTP) so a hung host cannot stall the poll loop.
-- Prefer **SSH keys** over passwords.
+- Prefer **SSH keys** over passwords. In Docker, mount the private key into `/root/.ssh` (see Quick start); passwords are the only SSH secret the app stores itself.
 - Treat the dashboard as **LAN-trusted**: the API is intentionally unauthenticated for ease of use on a private network. That includes **power APIs** (shutdown / Wake-on-LAN): anyone who can reach the dashboard can request fleet power actions.
 
 

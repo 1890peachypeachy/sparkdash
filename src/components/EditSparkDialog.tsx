@@ -577,6 +577,12 @@ export function EditSparkDialog({
                       <option value="key">Key</option>
                       <option value="pass">Password</option>
                     </select>
+                    {config.ssh.auth === "key" && (
+                      <p className="mt-1 text-[10px] text-muted">
+                        SSH runs on the sparkDash host. Docker: mount a key at /root/.ssh/id_ed25519
+                        (or SSH_IDENTITY_FILE). IPs are from that host, not your laptop.
+                      </p>
+                    )}
                   </div>
 
                   {config.ssh.auth === "pass" && (
