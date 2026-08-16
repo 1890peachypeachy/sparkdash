@@ -366,7 +366,7 @@ Copy `.env.example` to `.env` if needed:
 > The listener defaults to `127.0.0.1` (loopback) so the dashboard — which can SSH into and
 > power off your Sparks — isn't reachable on the LAN by default. Set `BIND_HOST` to the host's
 > LAN IP (or `0.0.0.0`) to reach it from another machine. The provided `docker-compose.yml`
-> (`network_mode: host`) sets `BIND_HOST=0.0.0.0` explicitly; restrict access at the network
+> (`network_mode: host`) sets `BIND_HOST=0.0.0.0` explicitly (prod and `docker-compose.dev.yml`); restrict access at the network
 > layer, or set `127.0.0.1` when running behind a reverse proxy.
 
 ### Adding a unit

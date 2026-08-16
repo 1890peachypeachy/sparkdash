@@ -29,6 +29,7 @@ services:
     # (otherwise local VRAM falls back to minute-old config/gpu-memory.json).
     pid: host
     environment:
+      - BIND_HOST=0.0.0.0
       - PORT=5555
       - LLM_PORT=8888
       - NODE_ENV=development
