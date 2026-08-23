@@ -63,7 +63,7 @@ export class LlmProbe {
     this.baseUrl = `http://${llmProbeHost(spark)}:${port}`;
 
     // State
-    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | null
+    this.backendType = null; // 'vllm' | 'llama.cpp' | 'sglang' | 'ds4' | 'exl3' | null
     this.serverIsOpenAI = null; // true = OpenAI-compatible
     /** Whether /v1/models (or /slots) answered without credentials. null = unknown. */
     this.authOpen = null;
@@ -275,7 +275,8 @@ export class LlmProbe {
     if (
       this.backendType !== "vllm" &&
       this.backendType !== "sglang" &&
-      this.backendType !== "ds4"
+      this.backendType !== "ds4" &&
+      this.backendType !== "exl3"
     ) {
       const slotUrl = `${this.baseUrl}/slots`;
       try {
@@ -322,18 +323,43 @@ export class LlmProbe {
   }
 
   /**
-   * Classify an OpenAI-compatible server: ds4-server, SGLang, or vLLM (default).
+   * Classify an OpenAI-compatible server: ds4, SGLang, EXL3, or vLLM (default).
    * @param {unknown} ownedBy
-   * @returns {Promise<"ds4" | "sglang" | "vllm">}
+   * @returns {Promise<"ds4" | "sglang" | "exl3" | "vllm">}
    */
   async _classifyOpenAIBackend(ownedBy) {
     if (typeof ownedBy === "string") {
       if (/ds4/i.test(ownedBy)) return "ds4";
       if (/sglang/i.test(ownedBy)) return "sglang";
+      if (/exl3/i.test(ownedBy)) return "exl3";
     }
     if (await this._probeIsDs4()) return "ds4";
     if (await this._probeIsSglang()) return "sglang";
+    if (await this._probeIsExl3()) return "exl3";
     return "vllm";
+  }
+
+  /**
+   * True when EXL3 `tools/serve_openai.py` /health exposes backend + token totals.
+   * Distinguishes from vLLM's /health (no `busy` + `completion_tokens_total`).
+   */
+  async _probeIsExl3() {
+    try {
+      const res = await this._fetch(`${this.baseUrl}/health`);
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => null);
+      return LlmProbe._healthLooksLikeExl3(data);
+    } catch {
+      return false;
+    }
+  }
+
+  /** @param {unknown} data */
+  static _healthLooksLikeExl3(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    if (data.backend === "exl3") return true;
+    // tools/serve_openai.py: { ok, busy } even before token counters existed.
+    return data.ok === true && typeof data.busy === "boolean";
   }
 
   /** True when SGLang native server-info endpoints respond. */
@@ -406,7 +432,27 @@ export class LlmProbe {
       if (/ds4/i.test(owned)) this.backendType = "ds4";
       else if (/sglang/i.test(owned) && this.backendType !== "ds4") {
         this.backendType = "sglang";
+      } else if (/exl3/i.test(owned) && this.backendType !== "ds4") {
+        this.backendType = "exl3";
       }
+    }
+
+    // EXL3 serve_openai.py: live tok/s from /health cumulative counters (no Prometheus).
+    if (this.backendType === "exl3" || this.backendType == null) {
+      try {
+        const healthRes = await this._fetch(`${this.baseUrl}/health`);
+        if (healthRes.ok) {
+          const health = await healthRes.json().catch(() => null);
+          if (LlmProbe._healthLooksLikeExl3(health)) {
+            this.backendType = "exl3";
+            this._applyExl3Health(health, dtSec);
+            return this._getSnapshot();
+          }
+        }
+      } catch {
+        /* health optional unless already classified exl3 */
+      }
+      if (this.backendType === "exl3") return this._getSnapshot();
     }
 
     // SGLang: native info endpoints. Skip on known vLLM/ds4 to avoid 404 spam.
@@ -460,11 +506,11 @@ export class LlmProbe {
           this.backendType = "vllm";
           this._applyVllmMetrics(txt, dtSec);
         }
-      } else if (this.backendType !== "ds4") {
+      } else if (this.backendType !== "ds4" && this.backendType !== "exl3") {
         this.backendType = "vllm";
       }
     } catch {
-      if (this.backendType !== "ds4") this.backendType = "vllm";
+      if (this.backendType !== "ds4" && this.backendType !== "exl3") this.backendType = "vllm";
     }
 
     return this._getSnapshot();
@@ -555,6 +601,58 @@ export class LlmProbe {
     this.preemptionsTotal = null;
     this.e2eP95Seconds = null;
     this.itlP95Seconds = null;
+  }
+
+  /**
+   * Apply EXL3 tools/serve_openai.py GET /health.
+   * Live tok/s from cumulative counter diffs so idle → 0.
+   * @param {Record<string, unknown>} data
+   * @param {number} dtSec
+   */
+  _applyExl3Health(data, dtSec) {
+    const prompt = Number(data?.prompt_tokens_total);
+    const completion = Number(data?.completion_tokens_total);
+    const busy = data?.busy === true;
+    const ctx = Number(data?.context_length);
+    if (Number.isFinite(ctx) && ctx > 0) this.contextLength = Math.round(ctx);
+
+    this.requestsRunning = busy ? 1 : 0;
+    this.slotsActive = busy ? 1 : 0;
+    this.slotsTotal = 1;
+    this.kvCacheUsage = null;
+    this.requestsWaiting = null;
+    this.ttftP95Seconds = null;
+    this.preemptionsTotal = null;
+    this.prefixCacheHitRate = null;
+    this.e2eP95Seconds = null;
+    this.itlP95Seconds = null;
+    this.mtpAcceptanceRate = null;
+    this.cachedPrefillTps = null;
+    this.uncachedPrefillTps = null;
+
+    if (!Number.isFinite(completion)) {
+      this.generationTps = busy ? this.generationTps : 0;
+      if (!busy) this.prefillTps = 0;
+      return;
+    }
+
+    if (dtSec > 0 && dtSec < 10) {
+      const deltaOut = completion - this.lastTokenCounts.output;
+      this.generationTps = Math.max(0, Math.round((deltaOut / dtSec) * 100) / 100);
+      if (Number.isFinite(prompt)) {
+        const deltaIn = prompt - this.lastTokenCounts.input;
+        this.prefillTps = Math.max(0, Math.round((deltaIn / dtSec) * 100) / 100);
+      } else if (!busy && this.generationTps <= 0) {
+        this.prefillTps = 0;
+      }
+    } else if (!busy) {
+      this.generationTps = 0;
+      this.prefillTps = 0;
+    }
+
+    if (Number.isFinite(prompt)) this.lastTokenCounts.input = prompt;
+    this.lastTokenCounts.output = completion;
+    this.totalOutputTokens = completion;
   }
 
   /**

@@ -51,10 +51,9 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ## Latest version changelog
 
-### Version 1.8.1 — Daily LLM history and Docker SSH keys
-- **Daily decode / prefill history** — 14-day peak tok/s on the LLM card (busy samples only), persisted in `config/llm-daily.json`
-- **Cached vs uncached prefill** — live rows on ds4, llama.cpp (`n_prompt_tokens_cache`), and SGLang (`--enable-metrics`); vLLM keeps combined prefill + prefix-cache hit rate
-- **Docker SSH key auth** — document bind-mounting a host key into `/root/.ssh` (or `SSH_IDENTITY_FILE`); IPs are from the sparkDash host, not the browser
+### Version 1.8.2 — EXL3 tok/s and Docker Hub IPv6
+- **EXL3 live tok/s** — ExLlamaV3 OpenAI server is no longer treated as vLLM; decode/prefill rates come from `/health` token counters
+- **Docker Node image** — pull `node` from `public.ecr.aws` so Spark builds survive Docker Hub IPv6 failures
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -68,7 +67,7 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Non-Spark GPU hosts** | Linux boxes with a dedicated NVIDIA GPU are first-class units: same `nvidia-smi` collectors over SSH, detected hardware summary, and separate **RAM** / **VRAM** panels. Detail page: GPU (left) + **RAM → Network → Storage** (right column); Overview cards show RAM and VRAM bars |
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
-| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live decode/prefill tok/s; cached vs uncached prefill on ds4, llama.cpp, and SGLang; **daily peak** history on the LLM card |
+| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, ds4-server, or EXL3; live decode/prefill tok/s; cached vs uncached prefill on ds4, llama.cpp, and SGLang; **daily peak** history on the LLM card |
 | **ComfyUI** | Opt-in probe: queue/jobs, progress, cancel, Open link, inventory, overview chip |
 | **Hermes Agent** | Opt-in per unit: background update check (10 min), status badges, one-click or batch `hermes update` |
 | **Tailnet** | Opt-in probe: flags a unit that is healthy on the LAN but off its tailnet |

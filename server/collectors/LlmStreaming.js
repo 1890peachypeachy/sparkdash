@@ -99,6 +99,22 @@ export async function readServerGenerationTokens(baseUrl, opts = {}) {
     /* try next */
   }
 
+  // EXL3 serve_openai.py — cumulative completion tokens on /health
+  try {
+    const res = await fetch(`${baseUrl}/health`, {
+      signal: AbortSignal.timeout(5_000),
+      headers,
+    });
+    if (res.ok) {
+      const data = await res.json();
+      const v = Number(data?.completion_tokens_total);
+      if (Number.isFinite(v) && data?.backend === "exl3") return v;
+      if (Number.isFinite(v) && typeof data?.busy === "boolean") return v;
+    }
+  } catch {
+    /* try next */
+  }
+
   // SGLang
   try {
     const res = await fetch(`${baseUrl}/get_server_info`, {

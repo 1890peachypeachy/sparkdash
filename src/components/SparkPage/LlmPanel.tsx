@@ -46,6 +46,7 @@ function BackendBadge({ backend }: { backend: string | null }) {
     "llama.cpp": "llama.cpp",
     sglang: "sgLang",
     ds4: "ds4",
+    exl3: "EXL3",
   };
 
   return (
@@ -300,7 +301,7 @@ export function LlmPanel({
       {showSettings ? (
         <div className="space-y-3">
           <p className="text-[10px] text-muted">
-            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / OpenAI-compatible gateway).
+            HTTP port of the LLM server on this Spark (vLLM / llama.cpp / sglang / ds4 / EXL3 / OpenAI-compatible gateway).
           </p>
           <label className="block space-y-1">
             <span className="text-xs text-muted">Port</span>
