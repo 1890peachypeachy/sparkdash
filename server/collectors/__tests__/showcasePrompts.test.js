@@ -91,9 +91,11 @@ test("catalog prompts exist for text, structural, and mixed pickers", () => {
   assert.ok(textCount >= 2);
 });
 
-test("DecodeBench uses Showcase structural prompts at temperature 0, thinking off", () => {
-  assert.match(benchSrc, /pickShowcasePrompts\("structural"/);
-  assert.match(benchSrc, /withFillToMaxInstruction/);
+test("DecodeBench uses the lab decode-bench protocol at temperature 0, thinking off", () => {
+  assert.match(benchSrc, /pickDecodeBenchPrompts/);
+  assert.match(benchSrc, /decodeBenchPromptForType/);
+  assert.match(benchSrc, /count 1\u2192200|structured protocol|matches glm-5.3-flash-sm120/);
+  assert.match(benchSrc, /DECODE_BENCH_DEFAULT_TYPE/);
   assert.match(benchSrc, /temperature:\s*0/);
   assert.match(benchSrc, /applyThinkingFlags\(body,\s*modelId,\s*false\)/);
   assert.match(benchSrc, /min_tokens:\s*maxTokens/);

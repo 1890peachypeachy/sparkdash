@@ -234,7 +234,7 @@ export function SparkPage({ spark, temperatureUnit, onEdit }: SparkPageProps) {
               /* Macs: no nvidia-smi — CPU + RAM span the left column; Storage → Network on the right */
               <>
                 <CpuPanel cpu={metrics.cpu} sparkId={spark.id} className="md:row-span-2" />
-                <RamPanel ram={metrics.ram} sparkId={spark.id} className="md:row-span-1" />
+                <RamPanel ram={metrics.ram} cpu={metrics.cpu} sparkId={spark.id} temperatureUnit={temperatureUnit} className="md:row-span-1" />
                 <StoragePanel
                   storage={metrics.storage}
                   sparkId={spark.id}
