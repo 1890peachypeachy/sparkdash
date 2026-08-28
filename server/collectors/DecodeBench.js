@@ -4,9 +4,13 @@
  * Measures real post-first-token decode tok/s against an OpenAI-compatible
  * chat completions endpoint. Concurrency levels run one after another.
  *
+ * Output types (structured / prose / code / json) are prompt labels only —
+ * never response_format, grammars, or guided JSON.
+ *
  * Structured protocol (matches glm-5.3-flash-sm120 tests/bench_decode.py):
  * count 1→200, temperature 0, top_p 1, thinking off, warmup 32 tokens,
  * decode tok/s = (completion_tokens − 1) / (last − first token).
+ * The same sampling protocol applies to every type.
  */
 
 import { randomUUID } from "crypto";
@@ -23,7 +27,13 @@ import {
   sleep,
   stripFillForceFields,
 } from "./LlmStreaming.js";
-import { pickDecodeBenchPrompts, DECODE_STRUCTURED_PROMPT } from "../../src/shared/llmPrompts.js";
+import {
+  pickDecodeBenchPrompts,
+  decodeBenchPromptForType,
+  normalizeDecodeBenchType,
+  DECODE_BENCH_DEFAULT_TYPE,
+  DECODE_BENCH_TYPES,
+} from "../../src/shared/llmPrompts.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -34,7 +44,7 @@ const HISTORY_PATH =
 const ACTIVE_PATH =
   process.env.BENCH_ACTIVE_PATH || path.join(ROOT, "config", "bench-active.json");
 
-/** Lab structured count-1→200; temperature 0; thinking off; top_p 1. */
+/** Lab protocol: temperature 0; thinking off; top_p 1. Structured default. */
 
 const ALLOWED_CONCURRENCIES = new Set([1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32]);
 const DEFAULT_MAX_TOKENS = 400;
@@ -87,9 +97,9 @@ async function pollHardwareSamples(sampleHardware, signal, intervalMs = HARDWARE
   return samples;
 }
 
-/** Lab count-1→200 on every stream (C1 is the exact prompt). */
-function pickBenchPrompts(count) {
-  return pickDecodeBenchPrompts(count);
+/** Lab prompt for the selected type on every stream (C1 is the exact prompt). */
+function pickBenchPrompts(count, type) {
+  return pickDecodeBenchPrompts(count, type);
 }
 
 function decodeRequestBody(modelId, prompt, maxTokens) {
@@ -110,9 +120,10 @@ function decodeRequestBody(modelId, prompt, maxTokens) {
  * Short count stream so DFlash2 / Triton JIT is not billed on the first wave.
  * Best-effort: a warmup failure does not fail the job.
  */
-async function warmupDecode({ baseUrl, modelId, abortSignal, apiKey, debug = false }) {
+async function warmupDecode({ baseUrl, modelId, abortSignal, apiKey, debug = false, promptType = DECODE_BENCH_DEFAULT_TYPE }) {
   const url = `${baseUrl}/v1/chat/completions`;
-  const body = decodeRequestBody(modelId, DECODE_STRUCTURED_PROMPT, WARMUP_MAX_TOKENS);
+  const warmupPrompt = decodeBenchPromptForType(promptType);
+  const body = decodeRequestBody(modelId, warmupPrompt, WARMUP_MAX_TOKENS);
   const ctrl = new AbortController();
   const onParentAbort = () => ctrl.abort();
   if (abortSignal) {
@@ -137,7 +148,7 @@ async function warmupDecode({ baseUrl, modelId, abortSignal, apiKey, debug = fal
 
 /**
  * Run one concurrency wave: N simultaneous streams.
- * Prompts cycle the structural catalog (repeats after the catalog length).
+ * Prompts use the selected decode type (structured default).
  */
 function emptyWaveResult(concurrency, waveMs, results, modelId, error, prompts = [], debug = false) {
   return {
@@ -230,9 +241,10 @@ async function runConcurrencyWave({
   sampleHardware = null,
   debug = false,
   apiKey = null,
+  promptType = DECODE_BENCH_DEFAULT_TYPE,
 }) {
   const url = `${baseUrl}/v1/chat/completions`;
-  const prompts = pickBenchPrompts(concurrency);
+  const prompts = pickBenchPrompts(concurrency, promptType);
   const reqMeta = { url, modelId, maxTokens };
 
   const wallStart = performance.now();
@@ -655,6 +667,7 @@ export class DecodeBenchManager {
    *   modelId: string | null,
    *   concurrencies: number[],
    *   maxTokens?: number,
+   *   promptType?: string,
    *   debug?: boolean,
    *   sampleHardware?: (() => Promise<object | null> | object | null) | null,
    *   apiKey?: string | null,
@@ -668,6 +681,7 @@ export class DecodeBenchManager {
       modelId,
       concurrencies: rawConc,
       maxTokens: rawMax,
+      promptType: rawType,
       debug = false,
       sampleHardware = null,
       apiKey = null,
@@ -702,6 +716,7 @@ export class DecodeBenchManager {
       throw err;
     }
 
+    const promptType = normalizeDecodeBenchType(rawType);
     const debugOn = Boolean(debug);
     const benchId = randomUUID();
     const abort = new AbortController();
@@ -716,6 +731,7 @@ export class DecodeBenchManager {
         modelId: modelId || null,
         concurrencies,
         maxTokens,
+        promptType,
         ...(debugOn ? { debug: true } : {}),
       },
       progress: {
@@ -768,6 +784,7 @@ export class DecodeBenchManager {
           abortSignal: job._abort.signal,
           apiKey: job._apiKey,
           debug,
+          promptType: job.config.promptType,
         });
       }
       for (const c of job.config.concurrencies) {
@@ -793,6 +810,7 @@ export class DecodeBenchManager {
           sampleHardware: job._sampleHardware,
           debug,
           apiKey: job._apiKey,
+          promptType: job.config.promptType,
         });
 
         if (job._abort.signal.aborted) {
@@ -891,4 +909,6 @@ export const DECODE_BENCH_DEFAULTS = {
   defaultMaxTokens: DEFAULT_MAX_TOKENS,
   minMaxTokens: MIN_MAX_TOKENS,
   maxMaxTokens: MAX_MAX_TOKENS,
+  promptTypes: [...DECODE_BENCH_TYPES],
+  defaultPromptType: DECODE_BENCH_DEFAULT_TYPE,
 };

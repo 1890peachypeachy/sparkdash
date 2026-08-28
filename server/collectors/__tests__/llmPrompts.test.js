@@ -6,8 +6,14 @@ import { strict as assert } from "node:assert";
 import {
   STRUCTURAL_PROMPTS,
   DECODE_STRUCTURED_PROMPT,
+  DECODE_PROSE_PROMPT,
+  DECODE_CODE_PROMPT,
+  DECODE_JSON_PROMPT,
+  DECODE_BENCH_DEFAULT_TYPE,
   pickShowcasePrompts,
   pickDecodeBenchPrompts,
+  normalizeDecodeBenchType,
+  decodeBenchPromptForType,
   withFillToMaxInstruction,
 } from "../../../src/shared/llmPrompts.js";
 
@@ -40,6 +46,28 @@ test("decode bench uses lab count-1-200, not the Showcase catalog", () => {
   assert.equal(new Set(many).size, 4);
   for (const p of many) {
     assert.match(p, /Count from 1 to 200/);
+  }
+});
+
+test("decode bench types pick fixed prompts (structured default)", () => {
+  assert.equal(normalizeDecodeBenchType(undefined), DECODE_BENCH_DEFAULT_TYPE);
+  assert.equal(normalizeDecodeBenchType("nope"), "structured");
+  assert.equal(decodeBenchPromptForType("structured"), DECODE_STRUCTURED_PROMPT);
+  assert.equal(decodeBenchPromptForType("prose"), DECODE_PROSE_PROMPT);
+  assert.match(DECODE_PROSE_PROMPT, /hash map works/);
+  assert.equal(decodeBenchPromptForType("code"), DECODE_CODE_PROMPT);
+  assert.match(DECODE_CODE_PROMPT, /LRU cache/);
+  assert.doesNotMatch(DECODE_CODE_PROMPT, /JSON schema|response_format|xgrammar/i);
+  assert.equal(decodeBenchPromptForType("json"), DECODE_JSON_PROMPT);
+  assert.equal(DECODE_JSON_PROMPT, STRUCTURAL_PROMPTS[0]);
+
+  const prose = pickDecodeBenchPrompts(1, "prose");
+  assert.equal(prose[0], DECODE_PROSE_PROMPT);
+  const codeMany = pickDecodeBenchPrompts(3, "code");
+  assert.equal(codeMany.length, 3);
+  assert.equal(new Set(codeMany).size, 3);
+  for (const p of codeMany) {
+    assert.match(p, /LRU cache/);
   }
 });
 

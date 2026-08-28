@@ -50,6 +50,83 @@ export const FILL_TO_MAX_SUFFIX =
 export const DECODE_STRUCTURED_PROMPT =
   "Count from 1 to 200. Output only the numbers, separated by spaces. No other text.";
 
+/** Same prompt as glm-5.3-flash-sm120 `tests/bench_decode.py` default (hash-map prose). */
+export const DECODE_PROSE_PROMPT =
+  "Write a detailed step-by-step explanation of how a hash map works, " +
+  "including collision handling, resizing, and time complexity. Be thorough.";
+
+/** Fixed code-shaped workload (not grammar/schema — unconstrained code output). */
+export const DECODE_CODE_PROMPT =
+  "Implement a complete LRU cache in Python using a hash map and a doubly linked list. " +
+  "Include get, put, eviction, capacity tracking, and thorough comments. " +
+  "Output only Python source code.";
+
+/**
+ * JSON/YAML-ish catalog (Showcase structural #0). Labels an output shape only —
+ * do not send response_format / grammars / guided JSON with this prompt.
+ */
+export const DECODE_JSON_PROMPT = STRUCTURAL_PROMPTS[0];
+
+/** Decode-bench output types (not guided decoding). Structured is the default. */
+export const DECODE_BENCH_TYPES = ["structured", "prose", "code", "json"];
+export const DECODE_BENCH_DEFAULT_TYPE = "structured";
+
+export const DECODE_BENCH_PROMPTS = {
+  structured: DECODE_STRUCTURED_PROMPT,
+  prose: DECODE_PROSE_PROMPT,
+  code: DECODE_CODE_PROMPT,
+  json: DECODE_JSON_PROMPT,
+};
+
+export const DECODE_BENCH_TYPE_META = [
+  {
+    id: "structured",
+    label: "Structured",
+    hint: "Count 1→200, numbers only — lab structured protocol",
+  },
+  {
+    id: "prose",
+    label: "Prose",
+    hint: "Hash-map explanation — lab default bench prompt",
+  },
+  {
+    id: "code",
+    label: "Code",
+    hint: "LRU cache in Python — unconstrained code-shaped output",
+  },
+  {
+    id: "json",
+    label: "JSON",
+    hint: "JSON GPU-metrics catalog — output type only, not guided JSON",
+  },
+];
+
+/**
+ * @param {unknown} type
+ * @returns {"structured" | "prose" | "code" | "json"}
+ */
+export function normalizeDecodeBenchType(type) {
+  const t = String(type || "").trim().toLowerCase();
+  return DECODE_BENCH_TYPES.includes(t) ? t : DECODE_BENCH_DEFAULT_TYPE;
+}
+
+/**
+ * @param {unknown} type
+ * @returns {string}
+ */
+export function decodeBenchPromptForType(type) {
+  return DECODE_BENCH_PROMPTS[normalizeDecodeBenchType(type)];
+}
+
+/**
+ * @param {unknown} type
+ * @returns {string}
+ */
+export function decodeBenchTypeLabel(type) {
+  const id = normalizeDecodeBenchType(type);
+  return DECODE_BENCH_TYPE_META.find((m) => m.id === id)?.label || "Structured";
+}
+
 /**
  * Append a hard fill-to-max instruction unless the prompt already states it.
  * Soft phrases like "keep expanding" alone do not skip — models still EOS early.
@@ -95,18 +172,19 @@ export function pickShowcasePrompts(type, count) {
 }
 
 /**
- * Decode-bench prompts: lab count-1→200 on every stream (not the Showcase
- * JSON/YAML catalog). Concurrent streams get a unique suffix so they do not
- * share a prefix-cache block; C1 is the exact lab prompt.
+ * Decode-bench prompts for a workload type. Concurrent streams get a unique
+ * suffix so they do not share a prefix-cache block; C1 is the exact prompt.
  * @param {number} count
+ * @param {unknown} [type]
  * @returns {string[]}
  */
-export function pickDecodeBenchPrompts(count) {
+export function pickDecodeBenchPrompts(count, type) {
+  const base = decodeBenchPromptForType(type);
   const n = Math.max(1, Math.floor(count));
-  if (n <= 1) return [DECODE_STRUCTURED_PROMPT];
+  if (n <= 1) return [base];
   const out = [];
   for (let i = 0; i < n; i++) {
-    out.push(`${DECODE_STRUCTURED_PROMPT} (stream ${i + 1}/${n})`);
+    out.push(`${base} (stream ${i + 1}/${n})`);
   }
   return out;
 }

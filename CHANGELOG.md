@@ -11,6 +11,13 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.4] — 2026-08-28
+
+### Added
+- **Decode benchmark type picker** — choose **Structured** (default, count 1→200), **Prose** (lab hash-map explanation), **Code** (fixed LRU-cache Python prompt), or **JSON** (GPU-metrics catalog) before Run. Labels are output types only — no `response_format`, grammars, or guided JSON. Same lab protocol for every type: temp 0, `top_p` 1, thinking off, 32-token warmup, default 400 tokens. The selected type is shown on results and in copied summaries.
+
+---
+
 ## [1.8.3] — 2026-08-28
 
 ### Changed

@@ -542,11 +542,16 @@ export interface ApiError {
 }
 
 // ─── LLM decode benchmark ────────────────────────────────
+/** Output-shape label for decode bench prompts (not guided decoding). */
+export type DecodeBenchPromptType = "structured" | "prose" | "code" | "json";
+
 export interface DecodeBenchConfig {
   port: number;
   modelId: string | null;
   concurrencies: number[];
   maxTokens: number;
+  /** Output-shape label only — not guided decoding / JSON schema. */
+  promptType?: DecodeBenchPromptType;
 }
 
 export interface DecodeBenchStreamResult {
@@ -659,6 +664,8 @@ export interface DecodeBenchDefaults {
   defaultMaxTokens: number;
   minMaxTokens: number;
   maxMaxTokens: number;
+  promptTypes: DecodeBenchPromptType[];
+  defaultPromptType: DecodeBenchPromptType;
 }
 
 export interface DecodeBenchListResponse {
@@ -674,6 +681,8 @@ export interface StartDecodeBenchRequest {
   concurrencies: number[];
   maxTokens?: number;
   modelId?: string | null;
+  /** Output type: structured (default), prose, code, json. Prompt only. */
+  promptType?: DecodeBenchPromptType;
 }
 
 // ─── LLM Prompt Showcase ─────────────────────────────────
