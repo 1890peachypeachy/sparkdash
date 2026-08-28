@@ -44,6 +44,12 @@ export function isHfHubCachePath(id) {
   return /(?:^|\/)models--[^/]+/.test(String(id));
 }
 
+/** True when path is a generic container mount, not a real checkpoint id. */
+export function isGenericModelMount(id) {
+  if (id == null) return false;
+  return /^\/(model|draft)(\/|$)/.test(String(id).trim());
+}
+
 /**
  * Set modelId (always normalized) and modelPath (omit HF hub cache paths —
  * they duplicate the short id and clutter the LLM panel).
@@ -52,6 +58,11 @@ export function isHfHubCachePath(id) {
 function applyModelRef(probe, raw) {
   if (raw == null || raw === "") return;
   const s = String(raw);
+  // Keep an existing OpenAI served-model id when SGLang only reports /model.
+  if (isGenericModelMount(s) && probe.modelId && !isGenericModelMount(probe.modelId)) {
+    probe.modelPath = s;
+    return;
+  }
   probe.modelId = normalizeModelId(s);
   probe.modelPath = isHfHubCachePath(s) ? null : s;
 }
