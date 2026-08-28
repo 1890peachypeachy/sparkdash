@@ -51,9 +51,9 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ## Latest version changelog
 
-### Version 1.8.4 — decode bench type picker
-- **Decode benchmark types** — choose Structured (count 1→200, default), Prose, Code, or JSON before Run. Same lab protocol (temp 0, thinking off, warmup, 400 tokens). Output-type labels only — not guided JSON.
-- **Thinking off by default** — hybrid models get explicit disable flags; 400 retries no longer strip them (that re-enabled thinking)
+### Version 1.8.5 — decode Structured default + code prompt
+- **Decode picker defaults to Structured** even after a Prose/Code/JSON run. A live running job still shows its type.
+- **Code type** is `clamp_00`…`clamp_49` Python helpers (no comments). The old LRU + comments prompt was prose-speed.
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 

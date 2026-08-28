@@ -55,11 +55,17 @@ export const DECODE_PROSE_PROMPT =
   "Write a detailed step-by-step explanation of how a hash map works, " +
   "including collision handling, resizing, and time complexity. Be thorough.";
 
-/** Fixed code-shaped workload (not grammar/schema — unconstrained code output). */
+/** High-accept code: repeated identical-shape helpers (not an essay with `def`). */
 export const DECODE_CODE_PROMPT =
-  "Implement a complete LRU cache in Python using a hash map and a doubly linked list. " +
-  "Include get, put, eviction, capacity tracking, and thorough comments. " +
-  "Output only Python source code.";
+  "Output only Python source code. No comments, no docstrings, no markdown fences. " +
+  "Write functions clamp_00 through clamp_49. Each function is exactly:\n" +
+  "def clamp_NN(x, lo=0, hi=1):\n" +
+  "    if x < lo:\n" +
+  "        return lo\n" +
+  "    if x > hi:\n" +
+  "        return hi\n" +
+  "    return x\n" +
+  "Change only the function name suffix (00, 01, … 49). One blank line between functions. No other text.";
 
 /**
  * JSON/YAML-ish catalog (Showcase structural #0). Labels an output shape only —
@@ -92,7 +98,7 @@ export const DECODE_BENCH_TYPE_META = [
   {
     id: "code",
     label: "Code",
-    hint: "LRU cache in Python — unconstrained code-shaped output",
+    hint: "clamp_00…clamp_49 Python helpers — code-shaped, no comments",
   },
   {
     id: "json",

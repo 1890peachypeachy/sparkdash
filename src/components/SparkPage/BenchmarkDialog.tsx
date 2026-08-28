@@ -185,8 +185,12 @@ export function BenchmarkDialog({
     if (j.config?.maxTokens != null) {
       setMaxTokensDraft(String(j.config.maxTokens));
     }
-    if (j.config?.promptType) {
+    // Last-run type is shown on results; the picker always defaults to Structured
+    // for the next Run. Only a still-running job pins the picker.
+    if (j.status === "running" && j.config?.promptType) {
       setPromptType(normalizeDecodeBenchType(j.config.promptType));
+    } else {
+      setPromptType(DEFAULT_PROMPT_TYPE);
     }
   }, []);
 
@@ -248,6 +252,7 @@ export function BenchmarkDialog({
   useEffect(() => {
     if (!open) {
       stopPoll();
+      setPromptType(DEFAULT_PROMPT_TYPE);
       return;
     }
     setError(null);

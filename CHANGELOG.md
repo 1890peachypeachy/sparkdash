@@ -11,6 +11,14 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.5] — 2026-08-28
+
+### Fixed
+- **Decode type picker defaults to Structured** — opening the sheet (or loading a previous run) no longer leaves Prose/Code/JSON selected. A still-running job still shows its type.
+- **Code workload was prose-speed** — the LRU + "thorough comments" prompt is English with `def` sprinkled in, so DFlash2 accept matched Prose. Code is now `clamp_00`…`clamp_49` identical-shape Python helpers, no comments.
+
+---
+
 ## [1.8.4] — 2026-08-28
 
 ### Added

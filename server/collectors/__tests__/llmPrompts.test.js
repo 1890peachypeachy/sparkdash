@@ -56,7 +56,8 @@ test("decode bench types pick fixed prompts (structured default)", () => {
   assert.equal(decodeBenchPromptForType("prose"), DECODE_PROSE_PROMPT);
   assert.match(DECODE_PROSE_PROMPT, /hash map works/);
   assert.equal(decodeBenchPromptForType("code"), DECODE_CODE_PROMPT);
-  assert.match(DECODE_CODE_PROMPT, /LRU cache/);
+  assert.match(DECODE_CODE_PROMPT, /clamp_00 through clamp_49/);
+  assert.match(DECODE_CODE_PROMPT, /No comments/);
   assert.doesNotMatch(DECODE_CODE_PROMPT, /JSON schema|response_format|xgrammar/i);
   assert.equal(decodeBenchPromptForType("json"), DECODE_JSON_PROMPT);
   assert.equal(DECODE_JSON_PROMPT, STRUCTURAL_PROMPTS[0]);
@@ -67,7 +68,7 @@ test("decode bench types pick fixed prompts (structured default)", () => {
   assert.equal(codeMany.length, 3);
   assert.equal(new Set(codeMany).size, 3);
   for (const p of codeMany) {
-    assert.match(p, /LRU cache/);
+    assert.match(p, /clamp_00 through clamp_49/);
   }
 });
 
