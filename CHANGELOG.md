@@ -7,6 +7,67 @@ Format: version sections are listed newest first.
 
 ---
 
+## [Unreleased]
+
+---
+
+## [1.8.5] — 2026-08-28
+
+### Fixed
+- **Decode type picker defaults to Structured** — opening the sheet (or loading a previous run) no longer leaves Prose/Code/JSON selected. A still-running job still shows its type.
+- **Code workload was prose-speed** — the LRU + "thorough comments" prompt is English with `def` sprinkled in, so DFlash2 accept matched Prose. Code is now `clamp_00`…`clamp_49` identical-shape Python helpers, no comments.
+
+---
+
+## [1.8.4] — 2026-08-28
+
+### Added
+- **Decode benchmark type picker** — choose **Structured** (default, count 1→200), **Prose** (lab hash-map explanation), **Code** (fixed LRU-cache Python prompt), or **JSON** (GPU-metrics catalog) before Run. Labels are output types only — no `response_format`, grammars, or guided JSON. Same lab protocol for every type: temp 0, `top_p` 1, thinking off, 32-token warmup, default 400 tokens. The selected type is shown on results and in copied summaries.
+
+---
+
+## [1.8.3] — 2026-08-28
+
+### Changed
+- **Decode benchmark uses the lab structured protocol** — count 1→200 (numbers only) instead of the Showcase JSON/YAML catalog + fill-to-max. Temperature **0**, `top_p` **1**, thinking **off**, 32-token warmup, default max tokens **400**. Concurrency 1 is the same prompt as glm-5.3-flash-sm120 `tests/bench_decode.py --structured`; concurrent streams get a unique suffix so they do not share a prefix-cache block.
+- **Thinking flags default off** — GLM / Qwen / MiniMax think unless the request disables it. `applyThinkingFlags` now defaults to off and always sends `enable_thinking`, `thinking`, and `thinking_mode`. HTTP 400 retries keep an explicit off payload instead of stripping flags (stripping lets hybrid models think by default). Showcase treats a missing thinking flag as off.
+
+---
+
+## [1.8.2] — 2026-08-23
+
+### Added
+- **EXL3 live tok/s** — detect ExLlamaV3 `tools/serve_openai.py` (`owned_by: exl3` or `/health` `{ok, busy}`) instead of mislabeling it as vLLM. Generation and prefill tok/s come from `/health` cumulative token counters (no Prometheus `/metrics`).
+- **Tailnet monitoring** — opt-in per unit (`tailscaleMonitoring`, default **off**); `tailscale status --json` on the host and a Tailnet card under Resources. Flags a unit that is healthy on the LAN but off its tailnet. ([#43](https://github.com/MiaAI-Lab/sparkDash/pull/43))
+
+### Security
+- **`BIND_HOST` now defaults to `127.0.0.1` (loopback) instead of `0.0.0.0`** — the dashboard is unauthenticated and can SSH into and power off Sparks, so it is no longer reachable on the LAN by default. Set `BIND_HOST` to the host's LAN IP (or `0.0.0.0`) to opt in to remote access. **Migration:** if you access sparkDash from another machine via bare-metal `npm start`, set `BIND_HOST` explicitly. Production and dev Compose both set `BIND_HOST=0.0.0.0` (`network_mode: host`). Startup now also warns when bound to a non-loopback address. ([#35](https://github.com/MiaAI-Lab/sparkDash/pull/35))
+
+### Fixed
+- Decode bench `POST /api/sparks/:id/llm/bench` rejects LLM ports that are not in the Spark's configured list (same allowlist as showcase). ([#45](https://github.com/MiaAI-Lab/sparkDash/pull/45))
+- **Host CPU temperature** — dedicated GPU hosts (`kind: host`) show CPU temp on the RAM panel and Overview (hidden at 0°C / no sensor). Remote hosts now read hwmon/thermal over SSH. DGX Sparks still do not display CPU temp (remote Sparks still skip the extra sensor SSH). ([#34](https://github.com/MiaAI-Lab/sparkDash/pull/34))
+
+### Changed
+- Docker Node base image pulls from `public.ecr.aws/docker/library/node` so Spark builds do not fail on Docker Hub IPv6 `auth.docker.io` / “network is unreachable”. `deploy.sh` prints that workaround if a build still fails.
+- README architecture diagram top border aligned with the box. ([#39](https://github.com/MiaAI-Lab/sparkDash/pull/39))
+
+---
+
+## [1.8.1] — 2026-08-16
+
+### Added
+- **Daily LLM tok/s history** — busy-sample rollups (peak + mean) for decode and prefill, persisted in `config/llm-daily.json` (30 UTC days). 14-day peak chart on the LLM card; `GET /api/sparks/:id/llm/daily`.
+- **Cached vs uncached prefill tok/s** — live rows when the backend splits kinds: ds4 labeled prefill counters, llama.cpp `/slots` `n_prompt_tokens_cache`, SGLang `sglang:cached_tokens_total` (L1 `cache_source="device"`). Combined Prefill stays computed/uncached. vLLM is unchanged (combined prefill + prefix-cache hit rate).
+
+### Changed
+- **Docker SSH key auth** — compose comments + README: key auth runs inside the container (`/root/.ssh`), not the host user’s `~/.ssh`. Custom-named keys must be mounted as `id_ed25519` (or set `SSH_IDENTITY_FILE`). LAN IPs are from the sparkDash host. Add/Edit Spark hint when auth is Key.
+
+### Fixed
+- SGLang `/metrics` no longer overwrites `/get_server_info` tok/s when both are present.
+- llama.cpp `n_prompt_tokens_processed: 0` is not treated as missing (fully cached prompts).
+
+---
+
 ## [1.8.0] — 2026-08-15
 
 ### Added

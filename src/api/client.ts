@@ -4,6 +4,7 @@ import type {
   HermesBatchUpdateResponse,
   HermesUpdatesResponse,
   LlmMetrics,
+  LlmDailyResponse,
   Settings,
   ShowcaseListResponse,
   ShowcaseSessionState,
@@ -44,6 +45,16 @@ export function fetchSparkMetrics(id: string): Promise<{
   metrics?: { llm?: LlmMetrics[] };
 }> {
   return apiFetch(`/api/sparks/${id}/metrics`);
+}
+
+/** Daily busy tok/s rollups for one Spark LLM port. */
+export function fetchLlmDaily(
+  id: string,
+  port: number,
+  days = 14
+): Promise<LlmDailyResponse> {
+  const q = new URLSearchParams({ port: String(port), days: String(days) });
+  return apiFetch(`/api/sparks/${encodeURIComponent(id)}/llm/daily?${q.toString()}`);
 }
 
 export function addSpark(config: SparkConfig): Promise<{ success: boolean; spark: SparkConfig }> {

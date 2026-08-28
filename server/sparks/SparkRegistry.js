@@ -514,6 +514,10 @@ export class SparkRegistry {
       /** ComfyUI HTTP port (default 8188). */
       comfyPort: this._normalizeComfyPort(config.comfyPort),
       /**
+       * Opt-in tailnet presence via `tailscale status --json` (default false).
+       */
+      tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
+      /**
        * Opt-in: Hermes Agent CLI is installed on this machine. When enabled,
        * the SparkMonitor checks for updates and allows one-click `hermes update`.
        */

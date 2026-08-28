@@ -78,6 +78,10 @@ export interface SparkConfig {
    * `hermes update` for you via SSH.
    */
   hermesMonitoring?: boolean;
+  /**
+   * Report tailnet presence via `tailscale status --json` (default false; all roles).
+   */
+  tailscaleMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
 }
@@ -277,7 +281,7 @@ export interface UnifiedMemoryMetrics {
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
   available: boolean;
-  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "exl3" | null;
   modelId: string | null;
   modelPath: string | null;
   contextLength: number | null;
@@ -287,6 +291,10 @@ export interface LlmMetrics {
   slotsTotal: number;
   generationTps: number;
   prefillTps: number;
+  /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
+  cachedPrefillTps?: number | null;
+  /** Live uncached/computed prefill tok/s when split is available. */
+  uncachedPrefillTps?: number | null;
   /** Cumulative total output (generation) tokens as reported by the LLM server */
   totalOutputTokens: number;
   /** vLLM KV cache usage fraction (0–1). null when backend !== vllm or unreachable. */
@@ -314,6 +322,25 @@ export interface LlmMetrics {
    */
   posture?: LlmPosture | null;
   error: string | null;
+}
+
+/** One UTC day of busy tok/s rollups (null avg = no busy samples). */
+export interface LlmDailyDay {
+  date: string;
+  decodeMax: number;
+  decodeAvg: number | null;
+  prefillMax: number;
+  prefillAvg: number | null;
+  cachedPrefillMax: number | null;
+  cachedPrefillAvg: number | null;
+  uncachedPrefillMax: number | null;
+  uncachedPrefillAvg: number | null;
+}
+
+export interface LlmDailyResponse {
+  sparkId: string;
+  port: number;
+  days: LlmDailyDay[];
 }
 
 /** Security posture badge payload from LlmProbe. */
@@ -396,6 +423,30 @@ export interface ComfyMetrics {
   error: string | null;
 }
 
+export interface TailscaleMetrics {
+  /** True when `tailscale status --json` was read and had a Self entry. */
+  available: boolean;
+  /**
+   * The node's OWN view of whether it is talking to the coordination server.
+   * null when tailscale did not report it.
+   */
+  online: boolean | null;
+  /** tailscaled's own state: Running | Stopped | NeedsLogin | NoState. */
+  backendState: string | null;
+  hostName: string | null;
+  dnsName: string | null;
+  tailscaleIp: string | null;
+  /** DERP relay region, or null when the node has a direct path. */
+  relay: string | null;
+  /** ISO timestamp; null when key expiry is disabled for this node. */
+  keyExpiry: string | null;
+  keyExpired: boolean;
+  version: string | null;
+  /** Tailscale's own health warnings — these explain a false `online`. */
+  health: string[];
+  error: string | null;
+}
+
 // ─── Full metrics snapshot ────────────────────────────────
 export interface SparkMetrics {
   gpu: GpuMetrics | null;
@@ -408,6 +459,8 @@ export interface SparkMetrics {
   llm: LlmMetrics[];
   /** ComfyUI probe result when monitoring is enabled; null when off or not yet polled. */
   comfy?: ComfyMetrics | null;
+  /** Tailnet probe result when monitoring is enabled; null when off or not yet polled. */
+  tailscale?: TailscaleMetrics | null;
 }
 
 // ─── Spark snapshot (server pushes this) ──────────────────
@@ -445,6 +498,8 @@ export interface SparkSnapshot {
   comfyMonitoring?: boolean;
   /** ComfyUI HTTP port (default 8188) */
   comfyPort?: number;
+  /** Whether tailnet presence is probed (opt-in; all roles) */
+  tailscaleMonitoring?: boolean;
   /** Hermes Agent update monitoring state (present in every snapshot). */
   hermes?: HermesStatus;
   hardware: HardwareInfo;
@@ -487,11 +542,16 @@ export interface ApiError {
 }
 
 // ─── LLM decode benchmark ────────────────────────────────
+/** Output-shape label for decode bench prompts (not guided decoding). */
+export type DecodeBenchPromptType = "structured" | "prose" | "code" | "json";
+
 export interface DecodeBenchConfig {
   port: number;
   modelId: string | null;
   concurrencies: number[];
   maxTokens: number;
+  /** Output-shape label only — not guided decoding / JSON schema. */
+  promptType?: DecodeBenchPromptType;
 }
 
 export interface DecodeBenchStreamResult {
@@ -604,6 +664,8 @@ export interface DecodeBenchDefaults {
   defaultMaxTokens: number;
   minMaxTokens: number;
   maxMaxTokens: number;
+  promptTypes: DecodeBenchPromptType[];
+  defaultPromptType: DecodeBenchPromptType;
 }
 
 export interface DecodeBenchListResponse {
@@ -619,6 +681,8 @@ export interface StartDecodeBenchRequest {
   concurrencies: number[];
   maxTokens?: number;
   modelId?: string | null;
+  /** Output type: structured (default), prose, code, json. Prompt only. */
+  promptType?: DecodeBenchPromptType;
 }
 
 // ─── LLM Prompt Showcase ─────────────────────────────────

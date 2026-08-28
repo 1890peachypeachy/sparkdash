@@ -181,6 +181,7 @@ export function EditSparkDialog({
         config.ssh?.auth !== savedConfig.ssh?.auth ||
         (config.kind ?? "spark") !== (savedConfig.kind ?? "spark") ||
         Boolean(config.comfyMonitoring) !== Boolean(savedConfig.comfyMonitoring) ||
+        Boolean(config.tailscaleMonitoring) !== Boolean(savedConfig.tailscaleMonitoring) ||
         (config.comfyPort ?? 8188) !== (savedConfig.comfyPort ?? 8188);
 
       const result = formDirty
@@ -252,6 +253,7 @@ export function EditSparkDialog({
           return Number.isInteger(n) && n >= 1 && n <= 65535 ? n : 8188;
         })(),
         hermesMonitoring: Boolean(config.hermesMonitoring),
+        tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
         ssh: {
           host: config.ssh.host || config.lanIp,
           user: config.ssh.user,
@@ -504,6 +506,25 @@ export function EditSparkDialog({
                 machine via SSH.
               </p>
 
+              <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted">
+                <label className="flex min-w-0 items-center gap-2">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(config.tailscaleMonitoring)}
+                    onChange={(e) => update({ tailscaleMonitoring: e.target.checked })}
+                    className="rounded border-border"
+                  />
+                  <span>Tailnet monitoring</span>
+                  <span
+                    className="inline-flex shrink-0 cursor-help text-muted hover:text-text"
+                    title="When enabled, run `tailscale status --json` on this host and show a Tailnet card. Catches a unit that is healthy on the LAN but has fallen off its tailnet. Requires the tailscale CLI. Default off."
+                    aria-label="Enable reporting this unit's tailnet presence."
+                  >
+                    <InfoIcon className="h-3.5 w-3.5" />
+                  </span>
+                </label>
+              </div>
+
               {role === "worker" && (
                 <div className="space-y-3">
                   <div>
@@ -578,6 +599,12 @@ export function EditSparkDialog({
                       <option value="key">Key</option>
                       <option value="pass">Password</option>
                     </select>
+                    {config.ssh.auth === "key" && (
+                      <p className="mt-1 text-[10px] text-muted">
+                        SSH runs on the sparkDash host. Docker: mount a key at /root/.ssh/id_ed25519
+                        (or SSH_IDENTITY_FILE). IPs are from that host, not your laptop.
+                      </p>
+                    )}
                   </div>
 
                   {config.ssh.auth === "pass" && (

@@ -33,6 +33,7 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 - [Features](#features)
 - [ComfyUI monitoring](#comfyui-monitoring)
 - [Hermes Agent monitoring](#hermes-agent-monitoring)
+- [Tailnet monitoring](#tailnet-monitoring)
 - [Full changelog](./CHANGELOG.md)
 - [Quick start](#quick-start)
 - [Architecture](#architecture)
@@ -50,16 +51,9 @@ It also supports **non-Spark units**: any Linux machine with an NVIDIA GPU (e.g.
 
 ## Latest version changelog
 
-### Version 1.8.0 — Non-Spark units, prefill, and host RAM/VRAM
-- **Non-Spark unit support** — add a **dedicated GPU host** (kind `host`): any Linux box with an NVIDIA GPU, monitored via the same SSH + `nvidia-smi` collectors but **not** labeled as a DGX Spark. Hosts get a detected hardware summary (GPU model / driver / CPU / RAM) and separate **RAM** vs **VRAM** panels — VRAM is real discrete GPU memory from `nvidia-smi`, RAM is system memory from `/proc/meminfo`. On the unit page the Resources layout for hosts is **GPU in the left column** with **RAM → Network → Storage stacked in the right column** (Sparks keep their original layout). Overview cards add a RAM bar for hosts.
-- **Prefill tok/s next to decode** — live LLM panel sparkline, Overview cards as two columns (**tok/s** | **prefill**), decode-bench **Prefill** column (`prompt_tokens` ÷ TTFT)
-- **Live prefill** — vLLM engine-step tokens (including short prefills that share a poll with first decode); ds4 computed prefill diffs; 0 when idle. Shows while the engine is reading the prompt / building KV cache (send or regenerate), not when you only open a saved chat
-
-### Version 1.6.0 — ComfyUI monitoring & compact default
-- **ComfyUI** — opt-in per Spark (port 8188): live jobs, progress, last run, cancel, queue ETA, Open on LAN IP, model inventory
-- **Overview** — Comfy status chip (`idle` / `run` / `Nq`)
-- **Layout** — collapsible Resources / Services; LLM + Comfy side-by-side; multi-LLM row rules
-- **Compact UI** — default density (comfortable still in Settings)
+### Version 1.8.5 — decode Structured default + code prompt
+- **Decode picker defaults to Structured** even after a Prose/Code/JSON run. A live running job still shows its type.
+- **Code type** is `clamp_00`…`clamp_49` Python helpers (no comments). The old LRU + comments prompt was prose-speed.
 
 Full history: [CHANGELOG.md](./CHANGELOG.md)
 
@@ -73,10 +67,11 @@ Full history: [CHANGELOG.md](./CHANGELOG.md)
 | **Non-Spark GPU hosts** | Linux boxes with a dedicated NVIDIA GPU are first-class units: same `nvidia-smi` collectors over SSH, detected hardware summary, and separate **RAM** / **VRAM** panels. Detail page: GPU (left) + **RAM → Network → Storage** (right column); Overview cards show RAM and VRAM bars |
 | **Live streaming** | WebSocket metrics with configurable poll intervals; central history store for sparklines across tab switches |
 | **Local + remote** | Host metrics via sysfs/proc/`nvidia-smi`; remotes over SSH (key or password) |
-| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, or ds4-server; live tok/s per server |
+| **LLM probe** | Auto-detects llama.cpp, vLLM, sglang, ds4-server, or EXL3; live decode/prefill tok/s; cached vs uncached prefill on ds4, llama.cpp, and SGLang; **daily peak** history on the LLM card |
 | **ComfyUI** | Opt-in probe: queue/jobs, progress, cancel, Open link, inventory, overview chip |
 | **Hermes Agent** | Opt-in per unit: background update check (10 min), status badges, one-click or batch `hermes update` |
-| **Decode benchmark** | Multi-concurrency streaming decode tok/s (server + per-stream), persisted last run |
+| **Tailnet** | Opt-in probe: flags a unit that is healthy on the LAN but off its tailnet |
+| **Decode benchmark** | Multi-concurrency streaming decode tok/s; type picker (Structured / Prose / Code / JSON); lab protocol (temp 0, thinking off); persisted last run |
 | **Prompt Showcase** | Full-page multi-terminal LLM streaming demo (up to 32 prompts) with live tok/s and copy-out |
 | **vLLM health** | KV cache %, run/wait queue, TTFT/E2E/ITL p95, preemptions, prefix cache, MTP accept from Prometheus `/metrics` |
 | **Multiple LLM ports** | Monitor several LLM servers on different ports simultaneously — each gets its own panel with independent backend detection and metrics |
@@ -200,6 +195,43 @@ Env (optional): `POLL_INTERVAL_HERMES` (default `600000` ms), `HERMES_UPDATE_TIM
 
 ---
 
+## Tailnet monitoring
+
+Opt-in per unit (default **off**). Runs `tailscale status --json` on the host and shows a **Tailnet** card under Resources.
+
+This closes a blind spot every LAN-based check shares, including sparkDash's own SSH liveness. When `tailscaled` loses its session with the coordination server, SSH/GPU/LLM can all stay healthy while the box is unreachable from off-LAN.
+
+### What is supported
+
+| Capability | Details |
+|------------|---------|
+| **Opt-in per unit** | `tailscaleMonitoring` (default **off**) in **Edit Spark** |
+| **Off-tailnet detection** | `Self.Online` — the node's *own* view of the coordination server |
+| **Reason, not just state** | Tailscale `Health` messages, backend state, tailnet IP, DERP relay, version, expired-key warning |
+
+Asked of **each node about itself**. Peer state is never the verdict. The probe is read-only (`tailscale up` / `down` / `login` are never run).
+
+### How to enable
+
+1. Open **Edit Spark**.
+2. Tick **Tailnet monitoring**.
+3. Save. The Tailnet card appears under Resources.
+
+### Host requirements
+
+- `tailscale` CLI on the monitored host, and `tailscaled` running.
+- Remote units: existing SSH. Local Docker: `nsenter` into the host mount namespace (same as `nvidia-smi`; `/host/proc` is already bind-mounted).
+
+### Config fields
+
+| Field | Default | Description |
+|-------|---------|-------------|
+| `tailscaleMonitoring` | `false` | Run `tailscale status --json` and show the Tailnet card |
+
+Env (optional): `POLL_INTERVAL_TAILSCALE` (default `30000`), `TAILSCALE_PROBE_TIMEOUT_MS` (default `8000`).
+
+---
+
 ## Quick start
 
 ```bash
@@ -222,6 +254,14 @@ For development with Docker (source-mounted, HMR):
 docker compose -f docker-compose.dev.yml up --build
 ```
 
+**Remote units + SSH keys (Docker):** SSH is executed *inside* the container on the sparkDash host (typically the head DGX). Configured LAN IPs are from **that** host’s point of view, not your laptop. OpenSSH looks for keys under `/root/.ssh` in the container — the host user’s `~/.ssh` is not used unless you bind-mount it. Uncomment this volume in `docker-compose.yml` (and recreate the container):
+
+```yaml
+- ${HOME}/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
+```
+
+If the key file has a non-default name (e.g. `id_ed25519_shared`), mount it **as** `id_ed25519`, or set `SSH_IDENTITY_FILE` to the path inside the container. Keep the file mode `600`. The unit that runs sparkDash itself should be added with **This host (local collectors — no SSH for metrics)**.
+
 ---
 
 ## Architecture
@@ -229,7 +269,7 @@ docker compose -f docker-compose.dev.yml up --build
 Design principle: **one Spark model, N instances**. Every unit is a record in `config/sparks.json` with a `kind` field (`spark` or `host`). The same `SparkMonitor`, `SystemCollector`, and `LlmProbe` code runs for all of them. Adding a unit is a config change, not a code change.
 
 ```txt
-┌────────────────────── Docker container (sparkDash) ──────────────────────┐
+┌────────────────────── Docker container (sparkDash) ────────────────────────┐
 │  Express (server/)                                                         │
 │  ├─ config/sparks.json        Spark registry (API read/write)              │
 │  ├─ SparkRegistry             load/persist Sparks; change events           │
@@ -313,6 +353,7 @@ sparkDash/
 | POST | `/api/sparks/:id/llm-ports` | Add an LLM port (hot) |
 | DELETE | `/api/sparks/:id/llm-ports/:port` | Remove an LLM port (hot) |
 | PUT | `/api/sparks/:id/llm-port` | LLM port — backward-compat (hot) |
+| GET | `/api/sparks/:id/llm/daily` | Daily busy decode/prefill tok/s (`port`, `days`) |
 | GET | `/api/settings` | Global settings |
 | PUT | `/api/settings` | Update global settings |
 | WS | `/ws` | Real-time metrics stream |
@@ -340,7 +381,7 @@ Copy `.env.example` to `.env` if needed:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `BIND_HOST` | `0.0.0.0` | HTTP and WebSocket listen address |
+| `BIND_HOST` | `127.0.0.1` | HTTP and WebSocket listen address. Loopback by default — the dashboard exposes SSH + power controls, so set a LAN IP (or `0.0.0.0`) to allow remote access. |
 | `PORT` | `5555` | HTTP + WebSocket listen port |
 | `LLM_PORT` | `8888` | Default LLM probe port |
 | `COMFY_PORT` | `8188` | Default ComfyUI probe port |
@@ -352,15 +393,21 @@ Copy `.env.example` to `.env` if needed:
 | `POLL_INTERVAL_LLM` | `2000` | LLM probe poll (ms) |
 | `POLL_INTERVAL_BANDWIDTH` | `2000` | Memory bandwidth / dmon poll (ms) |
 | `POLL_INTERVAL_HERMES` | `600000` | Hermes Agent update check poll (ms) |
+| `POLL_INTERVAL_TAILSCALE` | `30000` | Tailnet probe poll (ms) |
+| `TAILSCALE_PROBE_TIMEOUT_MS` | `8000` | Timeout for `tailscale status --json` (ms) |
 | `HERMES_UPDATE_TIMEOUT_MS` | `600000` | Hard timeout for running `hermes update` over SSH (ms) |
 | `POLL_INTERVAL_LIVENESS` | `5000` | Online/SSH liveness check (ms) |
 | `SPARKDASH_SECRETS_KEY` | _(auto)_ | Passphrase or 64-char hex for secret encryption |
 | `HOST_PROC_PATH` | `/host/proc` | Host proc mount inside container |
 | `HOST_SYS_PATH` | `/host/sys` | Host sys mount |
 | `HOST_ROOT_PATH` | `/host/root` | Host root mount |
+| `SSH_IDENTITY_FILE` | _(unset)_ | Path **inside the process** to a private key (`ssh -i`). Use when the bind-mount is not a default OpenSSH name. |
 
-> When using Docker's default bridge network, keep `BIND_HOST=0.0.0.0`.  
-> With `network_mode: host`, use `BIND_HOST=127.0.0.1` to restrict access to the local host or a reverse proxy.
+> The listener defaults to `127.0.0.1` (loopback) so the dashboard — which can SSH into and
+> power off your Sparks — isn't reachable on the LAN by default. Set `BIND_HOST` to the host's
+> LAN IP (or `0.0.0.0`) to reach it from another machine. The provided `docker-compose.yml`
+> (`network_mode: host`) sets `BIND_HOST=0.0.0.0` explicitly (prod and `docker-compose.dev.yml`); restrict access at the network
+> layer, or set `127.0.0.1` when running behind a reverse proxy.
 
 ### Adding a unit
 
@@ -368,7 +415,7 @@ Copy `.env.example` to `.env` if needed:
 2. Choose **Unit type**:
    - **NVIDIA DGX Spark** — the default; hardware summary shows DGX Spark specs and the CX7 IP field is available.
    - **Dedicated GPU host** — any Linux machine with an NVIDIA GPU. It is monitored exactly like a Spark (SSH + `nvidia-smi`) but is **not** reported as a DGX Spark: the header shows a detected hardware summary (GPU model, CPU, RAM) instead of fixed GB10 specs, and the page shows separate **RAM** and **VRAM** panels (VRAM from `nvidia-smi`, RAM from system memory). On the unit page, RAM → Network → Storage stack in the right column with GPU filling the left column.
-3. Set **Name**, **LAN IP** (required), optional **CX7 IP** (Sparks only), **SSH user**, and auth (key or password). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
+3. Set **Name**, **LAN IP** (required), optional **CX7 IP** (Sparks only), **SSH user**, and auth (key or password). LAN IP is probed from the sparkDash host. Key auth in Docker needs a key mounted into the container (see Quick start). Wake-on-LAN MAC is auto-read from **enP7s7** when online (optional override in Edit).
 4. **Test Connection** for SSH + LLM reachability.
 5. Save — a tab appears and metrics start streaming.
 
@@ -403,7 +450,7 @@ Choice is stored in `localStorage`.
 - Encryption key: `config/.secrets-key` (auto-generated) or `SPARKDASH_SECRETS_KEY`. **Do not delete the key file** or encrypted secrets become unreadable.
 - **Target validation** rejects clearly unsafe IPv4 targets (link-local `169.254.0.0/16`, `0.0.0.0/8`, multicast/reserved ≥ 224). Private, loopback, and public addresses are allowed so LAN and remote Sparks work.
 - SSH and HTTP probes use short timeouts (about 5 s SSH connect, 3 s HTTP) so a hung host cannot stall the poll loop.
-- Prefer **SSH keys** over passwords.
+- Prefer **SSH keys** over passwords. In Docker, mount the private key into `/root/.ssh` (see Quick start); passwords are the only SSH secret the app stores itself.
 - Treat the dashboard as **LAN-trusted**: the API is intentionally unauthenticated for ease of use on a private network. That includes **power APIs** (shutdown / Wake-on-LAN): anyone who can reach the dashboard can request fleet power actions.
 
 

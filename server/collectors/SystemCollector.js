@@ -1027,12 +1027,22 @@ export class SystemCollector {
         "cat /proc/stat | head -1",
         "echo '---'",
         "cat /proc/cpuinfo | grep -E 'CPU architecture|aarch64' | head -1",
+        ...(this.spark.kind === "host"
+          ? [
+              "echo '---'",
+              // Same hwmon-then-thermal priority as local `_getCPUTemperature()`.
+              // GB10 also exposes nvme/mlx5 sensors; the name allowlist keeps those out.
+              'for h in /sys/class/hwmon/*; do n=$(cat "$h/name" 2>/dev/null); case "$n" in coretemp|k10temp|zenpower|acpitz) for t in "$h"/temp*_input; do cat "$t" 2>/dev/null; break; done;; esac; done',
+              "cat /sys/class/thermal/thermal_zone*/temp 2>/dev/null",
+            ]
+          : []),
       ].join("; ");
 
       const output = await sshExec(this.spark, cmd);
       const sections = output.split("---");
       const statOut = sections[0]?.trim() || "";
       const cpuinfoOut = sections[1]?.trim() || "";
+      const tempOut = this.spark.kind === "host" ? sections[2] || "" : "";
 
       const cpuStat = this._parseCPUUsage(statOut);
       const totalDiff = cpuStat.total - (this.lastCpuStat?.total || cpuStat.total);
@@ -1046,11 +1056,34 @@ export class SystemCollector {
       const idleWatts = tdp * 0.08;
       const draw = idleWatts + (tdp - idleWatts) * Math.min(usage / 100, 1);
 
-      return { usage, temperature: 0, draw: Math.round(draw * 10) / 10, tdp: Math.round(tdp) };
+      return {
+        usage,
+        temperature: this.spark.kind === "host" ? this._parseSensorTemp(tempOut) : 0,
+        draw: Math.round(draw * 10) / 10,
+        tdp: Math.round(tdp),
+      };
     } catch (err) {
       console.error(`[SystemCollector] Remote CPU error for ${this.spark.id}:`, err.message);
       return this._defaultCpu();
     }
+  }
+
+  /**
+   * First plausible temperature from a remote sensor dump (raw millidegrees,
+   * one per line, highest priority first). Same accept range as local
+   * `_getCPUTemperature()`; returns 0 when nothing is readable.
+   *
+   * @param {string} raw
+   * @returns {number} degrees Celsius, or 0
+   */
+  _parseSensorTemp(raw) {
+    for (const line of String(raw).split("\n")) {
+      const millidegrees = parseInt(line.trim(), 10);
+      if (Number.isFinite(millidegrees) && millidegrees > 0 && millidegrees < 200000) {
+        return Math.round((millidegrees / 1000) * 10) / 10;
+      }
+    }
+    return 0;
   }
 
   async _getRemoteRam() {
