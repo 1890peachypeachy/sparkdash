@@ -12,7 +12,7 @@ import { useModalPresence } from "../../hooks/useModalPresence";
 
 const CONCURRENCY_OPTIONS = [1, 2, 3, 4, 5, 6, 8, 10, 12, 16, 24, 32] as const;
 const DEFAULT_SELECTED = [1, 2];
-const DEFAULT_MAX_TOKENS = 512;
+const DEFAULT_MAX_TOKENS = 400;
 
 interface BenchmarkDialogProps {
   open: boolean;
@@ -462,7 +462,7 @@ export function BenchmarkDialog({
                     Max tokens / stream
                   </label>
                   <p className="bench-sheet__hint">
-                    Default 512 · range 64–2048 · Showcase structural, temp 0, thinking off
+                    Default 400 · count 1→200, temp 0, thinking off (lab structured)
                   </p>
                 </div>
                 <input

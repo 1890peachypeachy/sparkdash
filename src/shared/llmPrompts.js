@@ -46,6 +46,10 @@ export const STRUCTURAL_PROMPTS = [
 export const FILL_TO_MAX_SUFFIX =
   " Continue generating until you hit the maximum output length; do not stop early—keep expanding with more content.";
 
+/** Same prompt as glm-5.3-flash-sm120 `tests/bench_decode.py --structured`. */
+export const DECODE_STRUCTURED_PROMPT =
+  "Count from 1 to 200. Output only the numbers, separated by spaces. No other text.";
+
 /**
  * Append a hard fill-to-max instruction unless the prompt already states it.
  * Soft phrases like "keep expanding" alone do not skip — models still EOS early.
@@ -86,6 +90,23 @@ export function pickShowcasePrompts(type, count) {
       out.push(TEXT_PROMPTS[ti % TEXT_PROMPTS.length]);
       ti += 1;
     }
+  }
+  return out;
+}
+
+/**
+ * Decode-bench prompts: lab count-1→200 on every stream (not the Showcase
+ * JSON/YAML catalog). Concurrent streams get a unique suffix so they do not
+ * share a prefix-cache block; C1 is the exact lab prompt.
+ * @param {number} count
+ * @returns {string[]}
+ */
+export function pickDecodeBenchPrompts(count) {
+  const n = Math.max(1, Math.floor(count));
+  if (n <= 1) return [DECODE_STRUCTURED_PROMPT];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    out.push(`${DECODE_STRUCTURED_PROMPT} (stream ${i + 1}/${n})`);
   }
   return out;
 }

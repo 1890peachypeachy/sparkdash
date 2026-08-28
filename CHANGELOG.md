@@ -11,6 +11,14 @@ Format: version sections are listed newest first.
 
 ---
 
+## [1.8.3] — 2026-08-28
+
+### Changed
+- **Decode benchmark uses the lab structured protocol** — count 1→200 (numbers only) instead of the Showcase JSON/YAML catalog + fill-to-max. Temperature **0**, `top_p` **1**, thinking **off**, 32-token warmup, default max tokens **400**. Concurrency 1 is the same prompt as glm-5.3-flash-sm120 `tests/bench_decode.py --structured`; concurrent streams get a unique suffix so they do not share a prefix-cache block.
+- **Thinking flags default off** — GLM / Qwen / MiniMax think unless the request disables it. `applyThinkingFlags` now defaults to off and always sends `enable_thinking`, `thinking`, and `thinking_mode`. HTTP 400 retries keep an explicit off payload instead of stripping flags (stripping lets hybrid models think by default). Showcase treats a missing thinking flag as off.
+
+---
+
 ## [1.8.2] — 2026-08-23
 
 ### Added
