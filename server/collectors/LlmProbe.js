@@ -63,6 +63,18 @@ function applyModelRef(probe, raw) {
     probe.modelPath = s;
     return;
   }
+  // Keep a clean served-model id when SGLang reports an absolute local
+  // checkpoint dir as model_path (e.g. --model-path <local dir>). The
+  // /v1/models id is the consumer-facing served name; the local dir is not.
+  if (
+    s.startsWith("/") &&
+    !isHfHubCachePath(s) &&
+    probe.modelId &&
+    !probe.modelId.startsWith("/")
+  ) {
+    probe.modelPath = s;
+    return;
+  }
   probe.modelId = normalizeModelId(s);
   probe.modelPath = isHfHubCachePath(s) ? null : s;
 }

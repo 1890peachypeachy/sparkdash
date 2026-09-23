@@ -318,6 +318,20 @@ function SparkCard({
               color={usageBarColor}
               caption={`${usage}%`}
             />
+            {(spark.metrics.cpu?.usage ?? 0) > 0 && (() => {
+              const cpuUsage = spark.metrics.cpu?.usage ?? 0;
+              const cpuUsageBarColor =
+                cpuUsage > 85 ? "bg-danger" : cpuUsage > 60 ? "bg-warning" : "bg-accent";
+              return (
+                <MetricBar
+                  label="CPU Usage"
+                  value={cpuUsage}
+                  max={100}
+                  color={cpuUsageBarColor}
+                  caption={`${cpuUsage}%`}
+                />
+              );
+            })()}
           </div>
 
           {/* Secondary stats */}
