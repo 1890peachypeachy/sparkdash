@@ -105,7 +105,10 @@ export class TailscaleProbe {
    * @returns {Promise<object>}
    */
   async probe() {
-    const cmd = "tailscale status --json";
+    // Absolute path: macOS GUI SSH sessions get /usr/bin:/bin:/usr/sbin:/sbin
+    // only, and the Tailscale CLI lives in /usr/local/bin (symlink to the app
+    // bundle) or /opt/homebrew/bin — plain `tailscale` is not on that PATH.
+    const cmd = "PATH=/usr/local/bin:/opt/homebrew/bin:$PATH tailscale status --json";
     let out;
     try {
       out = this.spark?.isLocal
