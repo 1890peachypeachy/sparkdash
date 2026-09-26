@@ -780,3 +780,22 @@ export interface ShowcaseStartResponse {
   sessionId: string;
   status: "running";
 }
+
+// ─── Lane control (read-only panel over the spark-lane harness) ──────────
+export type LaneState = "up" | "down" | "partial";
+
+export interface LaneInfo {
+  id: string;
+  nodes: string[];
+  endpoint: string;
+  model: string;
+  status: LaneState;
+  /** node -> lane id that currently holds it (omitted when free or held by this lane) */
+  holders: Record<string, string>;
+}
+
+export interface LaneStatusResponse {
+  /** node -> lane id currently occupying it ("" when free) */
+  nodes: Record<string, string>;
+  lanes: LaneInfo[];
+}

@@ -3,6 +3,8 @@ import type {
   DecodeBenchListResponse,
   HermesBatchUpdateResponse,
   HermesUpdatesResponse,
+  LaneInfo,
+  LaneStatusResponse,
   LlmMetrics,
   LlmDailyResponse,
   Settings,
@@ -383,4 +385,15 @@ export function updateSettings(patch: Partial<Settings>): Promise<Settings> {
     method: "PUT",
     body: JSON.stringify(patch),
   });
+}
+
+// ─── Lane control (read-only, Phase 1) ────────────────────
+/** Lane inventory from the spark-lane harness (id, nodes, endpoint, model, status, holders). */
+export function listLanes(force = false): Promise<{ lanes: LaneInfo[] }> {
+  return apiFetch(`/api/lanes${force ? "?force=1" : ""}`);
+}
+
+/** Live per-node census + per-lane status. */
+export function laneStatus(force = false): Promise<LaneStatusResponse> {
+  return apiFetch(`/api/lanes/status${force ? "?force=1" : ""}`);
 }

@@ -21,6 +21,7 @@ import { showcaseManager } from "./collectors/ShowcaseManager.js";
 import { llmProbeHost } from "./collectors/llmHost.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
+import { getLaneInventory, getLaneStatus } from "./collectors/LaneControl.js";
 
 dotenv.config();
 
@@ -31,7 +32,7 @@ const ROOT = path.resolve(__dirname, "..");
 // Default to loopback: the dashboard exposes SSH and remote power controls, so it
 // should not be reachable on the LAN unless explicitly opted in. Set BIND_HOST to the
 // host's LAN IP (or 0.0.0.0) to expose it; docker-compose.yml already sets 0.0.0.0.
-const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
+const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
 const COMFY_PORT = parseInt(process.env.COMFY_PORT || "8188", 10);
@@ -144,6 +145,26 @@ function clientKey(req) {
 // Never return SSH passwords in any response
 app.get("/api/sparks", (_req, res) => {
   res.json({ sparks: registry.publicSparks });
+});
+
+// ─── Lane control (read-only, Phase 1) ───────────────────
+// A front end over the spark-lane harness. GET-only for now: inventory + census.
+app.get("/api/lanes", async (req, res) => {
+  try {
+    const lanes = await getLaneInventory({ force: req.query.force === "1" });
+    res.json({ lanes });
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || "lane inventory failed" });
+  }
+});
+
+app.get("/api/lanes/status", async (req, res) => {
+  try {
+    const status = await getLaneStatus({ force: req.query.force === "1" });
+    res.json(status);
+  } catch (e) {
+    res.status(e.status || 500).json({ error: e.message || "lane status failed" });
+  }
 });
 
 // Ephemeral connectivity test — does not persist or start a monitor

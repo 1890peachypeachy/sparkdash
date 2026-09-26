@@ -1,4 +1,5 @@
 import path from "path";
+import os from "os";
 import { fileURLToPath } from "url";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -82,6 +83,19 @@ const HARDWARE_DEFAULTS = {
   CPU_TDP_FALLBACK: 185,
 };
 
+// ─── Lane control (sparkDash lane up/down panel) ──────────
+// The proven spark-lane harness is the single source of truth for lane up/down
+// (occupancy guards, recipe fidelity, canary verify). This server is a front end
+// over it, never a reimplementation. Override with SPARK_LANE_PATH.
+const SPARK_LANE_PATH =
+  process.env.SPARK_LANE_PATH ||
+  path.join(os.homedir(), "recipe-db", "spark-bench", "ops", "spark-lane");
+// Hard cap for a read-only `lanes --json` / `status --json` call.
+const SPARK_LANE_TIMEOUT_MS = parseInt(process.env.SPARK_LANE_TIMEOUT_MS || "60000", 10);
+// The inventory shells out over SSH to every node (~7s cold). Cache longer than the
+// panel's poll interval so an auto-refresh never fans out a fresh SSH sweep.
+const LANE_STATUS_TTL_MS = parseInt(process.env.LANE_STATUS_TTL_MS || "20000", 10);
+
 // ─── Host paths for Docker bind mounts ───────────────────
 const HOST_PATHS = {
   PROC: process.env.HOST_PROC_PATH || "/host/proc",
@@ -117,5 +131,8 @@ export {
   UNIT_CONVERSION,
   HARDWARE_DEFAULTS,
   HOST_PATHS,
+  SPARK_LANE_PATH,
+  SPARK_LANE_TIMEOUT_MS,
+  LANE_STATUS_TTL_MS,
   ROOT,
 };
