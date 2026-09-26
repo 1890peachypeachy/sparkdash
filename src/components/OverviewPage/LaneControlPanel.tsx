@@ -42,9 +42,8 @@ interface Dialog {
   kind: "down" | "swap";
   down: string[];
   up: string[];
-  /** lane the user must type to confirm (production :8000), else null */
-  typeName: string | null;
-  blocked?: string[];
+  /** EVERY production (:8000) lane being torn down — all names must be typed */
+  typeNames: string[];
 }
 
 export function LaneControlPanel() {
@@ -121,14 +120,13 @@ export function LaneControlPanel() {
           break;
         }
         setJob(j);
-        if (j.status !== "running") {
-          await load(true);
-          break;
-        }
+        if (j.status !== "running") break;
         await new Promise((r) => setTimeout(r, JOB_POLL_MS));
       }
+      // One forced refresh after the job settles — `load(true)` re-sweeps the fleet
+      // (~7s over SSH), so doing it inside the loop as well was a wasted sweep.
+      await load(true);
       setBusy(false);
-      void load(true);
     },
     [load],
   );
@@ -164,6 +162,13 @@ export function LaneControlPanel() {
       ? `${b.lane} needs ${b.node}, held by ${b.holder}`
       : `${(b.lanes ?? []).join(" + ")} share ${(b.nodes ?? []).join(",")}`,
   );
+
+  /** Production (:8000) lanes within a teardown set — each needs its name typed. */
+  const prodLanesIn = (ids: string[]) =>
+    ids.filter((id) => {
+      const l = byId.get(id);
+      return l ? isProduction(l) : false;
+    });
 
   return (
     <Panel
@@ -232,9 +237,8 @@ export function LaneControlPanel() {
               type="button"
               disabled={busy || !downSel.length}
               onClick={() => {
-                const prod = downSel.find((id) => byId.get(id) && isProduction(byId.get(id)!));
                 setTyped("");
-                setDialog({ kind: "down", down: downSel, up: [], typeName: prod ?? null });
+                setDialog({ kind: "down", down: downSel, up: [], typeNames: prodLanesIn(downSel) });
               }}
               className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1 text-[11px] transition-colors hover:bg-surface-hover disabled:opacity-40"
             >
@@ -246,9 +250,8 @@ export function LaneControlPanel() {
                 type="button"
                 disabled={busy || !plan?.launchable}
                 onClick={() => {
-                  const prod = downSel.find((id) => byId.get(id) && isProduction(byId.get(id)!));
                   setTyped("");
-                  setDialog({ kind: "swap", down: downSel, up: upSel, typeName: prod ?? null });
+                  setDialog({ kind: "swap", down: downSel, up: upSel, typeNames: prodLanesIn(downSel) });
                 }}
                 className="flex items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-[11px] transition-colors hover:bg-accent/20 disabled:opacity-40"
               >
@@ -373,8 +376,13 @@ function ConfirmDialog({
   onCancel: () => void;
   onConfirm: () => void;
 }) {
-  const needsType = Boolean(dialog.typeName);
-  const ready = !needsType || typed.trim() === dialog.typeName;
+  const required = dialog.typeNames;
+  // Every production lane in the teardown set must be named — typing one must not
+  // unlock tearing down another. Tokens are whitespace/comma separated so several
+  // can be typed into the one field.
+  const tokens = typed.toLowerCase().split(/[\s,]+/).filter(Boolean);
+  const ready = required.every((n) => tokens.includes(n.toLowerCase()));
+  const isSwap = dialog.up.length > 0;
 
   return (
     <div className="mt-3 rounded-md border border-warning/50 bg-warning/10 p-3">
@@ -386,14 +394,24 @@ function ConfirmDialog({
         This stops the model serving on those nodes. Lanes come back up only when you
         ask — nothing rotates on its own.
       </p>
-      {needsType && (
+      {isSwap && (
+        <p className="mt-1 rounded border border-warning/40 px-2 py-1 text-[11px] text-warning">
+          Swap runs in order: {dialog.down.join(", ")} goes down first, then{" "}
+          {dialog.up.join(", ")} comes up. Cancelling after the teardown finishes leaves those
+          nodes <strong>not serving</strong> — bring a lane back up before you walk away.
+        </p>
+      )}
+      {required.length > 0 && (
         <label className="mt-2 block text-[11px] text-warning">
-          <span className="font-semibold">{dialog.typeName} is production (:8000).</span> Type the
-          lane name to confirm:
+          <span className="font-semibold">
+            {required.join(", ")} {required.length > 1 ? "are" : "is"} production (:8000).
+          </span>{" "}
+          Type {required.length > 1 ? "each lane name (space-separated)" : "the lane name"} to
+          confirm:
           <input
             value={typed}
             onChange={(e) => onTyped(e.target.value)}
-            placeholder={dialog.typeName ?? ""}
+            placeholder={required.join(" ")}
             className="mt-1 w-full rounded border border-border bg-surface px-2 py-1 font-tabular text-[12px] text-text"
           />
         </label>

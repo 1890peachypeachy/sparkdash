@@ -26,10 +26,12 @@ const VERBS = new Set(["up", "down", "verify"]);
 const LOG_LIMIT = 500; // lines of harness output kept per job
 const HISTORY_LIMIT = 30;
 const BENCH_DIR = path.dirname(SPARK_LANE_PATH);
+/** Sentinel held in `active` while a start() is validating but not yet running. */
+const RESERVING = "__reserving__";
 
 /** Strip private fields before returning a job to clients. */
 function publicJob(job) {
-  const { _child, _failed, ...rest } = job;
+  const { _child, _failed, _cancelled, ...rest } = job;
   return rest;
 }
 
@@ -86,8 +88,11 @@ export class LaneManager {
    * @param {{up?: string[], down?: string[]}} req
    * @returns {Promise<{launchable: boolean, blocked: object[], freed: string[]}>}
    */
-  async plan({ up = [], down = [] } = {}) {
-    const inventory = await getLaneInventory();
+  async plan({ up = [], down = [] } = {}, { force = false } = {}) {
+    // `force` re-reads the harness instead of using the ~20s cache. Anything that
+    // gates a destructive action must pass force:true — deciding whether the fleet
+    // is clear from a 20s-old snapshot is how you launch on top of a live lane.
+    const inventory = await getLaneInventory({ force });
     const byId = new Map(inventory.map((l) => [l.id, l]));
     const unknown = [...up, ...down].filter((id) => !byId.has(id));
     if (unknown.length) {
@@ -148,66 +153,80 @@ export class LaneManager {
     if (this.active) {
       const err = new Error("A lane operation is already running");
       err.status = 409;
-      err.activeJobId = this.active;
+      err.activeJobId = this.active === RESERVING ? null : this.active;
       throw err;
     }
 
-    const verb = req.verb;
-    const isBatch = verb === "batch";
-    if (!isBatch && !VERBS.has(verb)) {
-      const err = new Error(`invalid verb: ${verb}`);
-      err.status = 400;
+    // Claim the slot SYNCHRONOUSLY, before the first await. Every validation below
+    // yields the event loop (the inventory call shells out to the harness), so
+    // without this reservation two requests arriving in the same tick both clear
+    // the check above and both go on to spawn lane operations 0.3ms apart — the
+    // exact concurrency the fleet-wide single-flight exists to prevent.
+    this.active = RESERVING;
+
+    try {
+      const verb = req.verb;
+      const isBatch = verb === "batch";
+      if (!isBatch && !VERBS.has(verb)) {
+        const err = new Error(`invalid verb: ${verb}`);
+        err.status = 400;
+        throw err;
+      }
+
+      // Validate lanes against the harness inventory before doing anything.
+      // force:true — never validate a destructive action against a cached fleet.
+      const inventory = await getLaneInventory({ force: true });
+      const known = new Set(inventory.map((l) => l.id));
+      const lanes = isBatch ? [...new Set([...(req.up || []), ...(req.down || [])])] : [req.lane];
+      const unknown = lanes.filter((id) => id && !known.has(id));
+      if (unknown.length) {
+        const err = new Error(`unknown lane(s): ${unknown.join(", ")}`);
+        err.status = 400;
+        throw err;
+      }
+      if (!isBatch && !req.lane) {
+        const err = new Error("lane is required");
+        err.status = 400;
+        throw err;
+      }
+      if (isBatch && !(req.up || []).length && !(req.down || []).length) {
+        const err = new Error("batch needs at least one lane in up or down");
+        err.status = 400;
+        throw err;
+      }
+
+      const jobId = randomUUID();
+      const job = {
+        jobId,
+        verb: isBatch ? "batch" : verb,
+        lane: isBatch ? null : req.lane,
+        up: isBatch ? (req.up || []) : [],
+        down: isBatch ? (req.down || []) : [],
+        source: req.source || "api",
+        status: "running",
+        startedAt: Date.now(),
+        completedAt: null,
+        progress: { log: [], step: "", message: "Starting…" },
+        steps: [], // {verb, lane, code, ok}
+        result: { ok: null },
+        error: null,
+        _child: null,
+        _failed: false,
+      };
+
+      this.jobs.set(jobId, job);
+      this.active = jobId;
+
+      this._run(job).catch(() => {
+        /* errors are recorded on the job */
+      });
+
+      return publicJob(job);
+    } catch (err) {
+      // Release the reservation so a rejected request doesn't lock the fleet out.
+      this.active = null;
       throw err;
     }
-
-    // Validate lanes against the harness inventory before doing anything.
-    const inventory = await getLaneInventory();
-    const known = new Set(inventory.map((l) => l.id));
-    const lanes = isBatch ? [...new Set([...(req.up || []), ...(req.down || [])])] : [req.lane];
-    const unknown = lanes.filter((id) => id && !known.has(id));
-    if (unknown.length) {
-      const err = new Error(`unknown lane(s): ${unknown.join(", ")}`);
-      err.status = 400;
-      throw err;
-    }
-    if (!isBatch && !req.lane) {
-      const err = new Error("lane is required");
-      err.status = 400;
-      throw err;
-    }
-    if (isBatch && !(req.up || []).length && !(req.down || []).length) {
-      const err = new Error("batch needs at least one lane in up or down");
-      err.status = 400;
-      throw err;
-    }
-
-    const jobId = randomUUID();
-    const job = {
-      jobId,
-      verb: isBatch ? "batch" : verb,
-      lane: isBatch ? null : req.lane,
-      up: isBatch ? (req.up || []) : [],
-      down: isBatch ? (req.down || []) : [],
-      source: req.source || "api",
-      status: "running",
-      startedAt: Date.now(),
-      completedAt: null,
-      progress: { log: [], step: "", message: "Starting…" },
-      steps: [], // {verb, lane, code, ok}
-      result: { ok: null },
-      error: null,
-      _child: null,
-      _failed: false,
-    };
-
-    this.jobs.set(jobId, job);
-    this.active = jobId;
-
-    this._run(job).catch(() => {
-      /* errors are recorded on the job */
-    });
-
-    return publicJob(job);
   }
 
   /** SIGTERM the running child. Status finalizes in _run's finally. */
@@ -245,20 +264,25 @@ export class LaneManager {
           /* ignore */
         }
       }, SPARK_LANE_TIMEOUT_MS);
-      child.on("error", (e) => {
+
+      // Node can emit 'error' and *then* 'close' for the same failure. Without this
+      // guard the step is recorded twice and the UI renders a duplicate ✗ line.
+      let settled = false;
+      const finish = (code, ok, note) => {
+        if (settled) return;
+        settled = true;
         clearTimeout(timer);
-        appendLog(job, `[spawn error] ${e.message}`);
-        job._failed = true;
-        job.steps.push({ verb, lane, code: -1, ok: false });
-        resolve(-1);
-      });
-      child.on("close", (code) => {
-        clearTimeout(timer);
-        const ok = code === 0;
         if (!ok) job._failed = true;
         job.steps.push({ verb, lane, code, ok });
-        job.progress.message = `${verb} ${lane} ${ok ? "ok" : `failed (exit ${code})`}`;
+        job.progress.message = note;
         resolve(code);
+      };
+      child.on("error", (e) => {
+        appendLog(job, `[spawn error] ${e.message}`);
+        finish(-1, false, `${verb} ${lane} spawn failed`);
+      });
+      child.on("close", (code) => {
+        finish(code, code === 0, `${verb} ${lane} ${code === 0 ? "ok" : `failed (exit ${code})`}`);
       });
     });
   }

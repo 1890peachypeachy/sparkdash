@@ -30,10 +30,11 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT = path.resolve(__dirname, "..");
 
-// Default to loopback: the dashboard exposes SSH and remote power controls, so it
-// should not be reachable on the LAN unless explicitly opted in. Set BIND_HOST to the
-// host's LAN IP (or 0.0.0.0) to expose it; docker-compose.yml already sets 0.0.0.0.
-const BIND_HOST = process.env.BIND_HOST || "0.0.0.0";
+// Default to loopback. This server now exposes an UNAUTHENTICATED lane-control
+// surface (POST /api/lanes/batch can take production inference down), so binding
+// 0.0.0.0 by default would put that on the LAN. The LaunchAgent and
+// docker-compose both set BIND_HOST explicitly; don't loosen this default.
+const BIND_HOST = process.env.BIND_HOST || "127.0.0.1";
 const PORT = parseInt(process.env.PORT || "5555", 10);
 const LLM_PORT = parseInt(process.env.LLM_PORT || "8888", 10);
 const COMFY_PORT = parseInt(process.env.COMFY_PORT || "8188", 10);
@@ -179,6 +180,14 @@ function laneError(res, e) {
   res.status(e?.status || 500).json(body);
 }
 
+/** Coerce a request field to a list of lane-id strings. A bare string is NOT a
+ *  list — spreading it would silently turn "dsv41-tp4" into 9 single-character
+ *  "lane ids". */
+function asLaneList(v) {
+  if (!Array.isArray(v)) return [];
+  return v.filter((x) => typeof x === "string" && x.trim() !== "").map((x) => x.trim());
+}
+
 /** Dry-run the node-disjointness gate — powers the live UI preview. */
 app.post("/api/lanes/check", async (req, res) => {
   try {
@@ -192,11 +201,15 @@ app.post("/api/lanes/check", async (req, res) => {
 /** Multi-select: bring some lanes up and/or take some down, as one gated action. */
 app.post("/api/lanes/batch", async (req, res) => {
   try {
-    const { up = [], down = [], confirm } = req.body || {};
+    const { confirm } = req.body || {};
+    const up = asLaneList((req.body || {}).up);
+    const down = asLaneList((req.body || {}).down);
     if (down.length && confirm !== true) {
       return res.status(400).json({ error: "confirm:true is required to take a lane down" });
     }
-    const plan = await laneManager.plan({ up, down });
+    // force:true — the decision that gates a destructive action must not be made
+    // from the panel's ~20s cache.
+    const plan = await laneManager.plan({ up, down }, { force: true });
     if (!plan.launchable) {
       return res
         .status(409)
@@ -227,6 +240,15 @@ app.post("/api/lanes/jobs/:jobId/cancel", (req, res) => {
 
 app.post("/api/lanes/:lane/up", async (req, res) => {
   try {
+    // Gate the single-lane path too. Without this the /batch route was the only
+    // place the node-disjointness rule was enforced server-side, so a direct POST
+    // here would start a bring-up the harness then had to refuse.
+    const plan = await laneManager.plan({ up: [req.params.lane] }, { force: true });
+    if (!plan.launchable) {
+      return res
+        .status(409)
+        .json({ error: `${req.params.lane} can't be brought up`, blocked: plan.blocked });
+    }
     const job = await laneManager.start({ verb: "up", lane: req.params.lane, source: "api" });
     res.status(202).json({ jobId: job.jobId, job });
   } catch (e) {
