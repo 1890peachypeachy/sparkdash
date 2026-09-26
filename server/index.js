@@ -22,6 +22,7 @@ import { llmProbeHost } from "./collectors/llmHost.js";
 import { llmDaily } from "./collectors/LlmDaily.js";
 import { compareSemver, getLatestRelease } from "./collectors/HermesReleases.js";
 import { getLaneInventory, getLaneStatus } from "./collectors/LaneControl.js";
+import { laneManager } from "./lanes/LaneManager.js";
 
 dotenv.config();
 
@@ -164,6 +165,93 @@ app.get("/api/lanes/status", async (req, res) => {
     res.json(status);
   } catch (e) {
     res.status(e.status || 500).json({ error: e.message || "lane status failed" });
+  }
+});
+
+// ─── Lane control actions (Phase 2) ──────────────────────
+// Literal routes are declared BEFORE the `/:lane/:verb` parameterized ones so they
+// can never be shadowed. All of these go through LaneManager, which enforces
+// fleet-wide single-flight and never issues an up/down the user did not request.
+function laneError(res, e) {
+  const body = { error: e?.message || "lane operation failed" };
+  if (e?.blocked) body.blocked = e.blocked;
+  if (e?.activeJobId) body.activeJobId = e.activeJobId;
+  res.status(e?.status || 500).json(body);
+}
+
+/** Dry-run the node-disjointness gate — powers the live UI preview. */
+app.post("/api/lanes/check", async (req, res) => {
+  try {
+    const { up = [], down = [] } = req.body || {};
+    res.json(await laneManager.plan({ up, down }));
+  } catch (e) {
+    laneError(res, e);
+  }
+});
+
+/** Multi-select: bring some lanes up and/or take some down, as one gated action. */
+app.post("/api/lanes/batch", async (req, res) => {
+  try {
+    const { up = [], down = [], confirm } = req.body || {};
+    if (down.length && confirm !== true) {
+      return res.status(400).json({ error: "confirm:true is required to take a lane down" });
+    }
+    const plan = await laneManager.plan({ up, down });
+    if (!plan.launchable) {
+      return res
+        .status(409)
+        .json({ error: "that selection can't be launched", blocked: plan.blocked });
+    }
+    const job = await laneManager.start({ verb: "batch", up, down, source: "api" });
+    res.status(202).json({ jobId: job.jobId, job });
+  } catch (e) {
+    laneError(res, e);
+  }
+});
+
+app.get("/api/lanes/jobs", (_req, res) => {
+  res.json(laneManager.list());
+});
+
+app.get("/api/lanes/jobs/:jobId", (req, res) => {
+  const job = laneManager.getJob(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "job not found" });
+  res.json(job);
+});
+
+app.post("/api/lanes/jobs/:jobId/cancel", (req, res) => {
+  const job = laneManager.cancel(req.params.jobId);
+  if (!job) return res.status(404).json({ error: "job not found" });
+  res.status(202).json({ jobId: job.jobId, status: job.status });
+});
+
+app.post("/api/lanes/:lane/up", async (req, res) => {
+  try {
+    const job = await laneManager.start({ verb: "up", lane: req.params.lane, source: "api" });
+    res.status(202).json({ jobId: job.jobId, job });
+  } catch (e) {
+    laneError(res, e);
+  }
+});
+
+app.post("/api/lanes/:lane/down", async (req, res) => {
+  try {
+    if ((req.body || {}).confirm !== true) {
+      return res.status(400).json({ error: "confirm:true is required to take a lane down" });
+    }
+    const job = await laneManager.start({ verb: "down", lane: req.params.lane, source: "api" });
+    res.status(202).json({ jobId: job.jobId, job });
+  } catch (e) {
+    laneError(res, e);
+  }
+});
+
+app.post("/api/lanes/:lane/verify", async (req, res) => {
+  try {
+    const job = await laneManager.start({ verb: "verify", lane: req.params.lane, source: "api" });
+    res.status(202).json({ jobId: job.jobId, job });
+  } catch (e) {
+    laneError(res, e);
   }
 });
 

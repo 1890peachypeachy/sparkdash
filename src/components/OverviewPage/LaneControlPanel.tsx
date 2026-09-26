@@ -1,14 +1,31 @@
-import { useCallback, useEffect, useState } from "react";
-import type { LaneInfo, LaneState } from "../../api/types";
-import { listLanes } from "../../api/client";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { LaneInfo, LaneJob, LanePlan, LaneState } from "../../api/types";
+import {
+  batchLanes,
+  cancelLaneJob,
+  checkLanes,
+  laneJob as fetchLaneJob,
+  laneVerify,
+  listLanes,
+} from "../../api/client";
 import { Panel } from "../ui/Panel";
-import { RotateIcon } from "../ui/icons";
+import { PowerOffIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
 
-/** Fleet-level lane control panel (Phase 1: read-only inventory).
+/**
+ * Fleet lane control (Phase 2: manual switches, no rotation).
  *
- * A front end over the spark-lane harness — this panel never decides what is safe
- * to run, it reports what the harness reports. Up/down switches (gated by
- * node-disjointness) land in Phase 2.
+ * Victor's model, verbatim: "I don't want rotation. I want to be able to pull
+ * down and put up whatever I want." So there is no prescribed sequence and no
+ * auto-parking here. The panel proposes nothing; it only executes the lanes you
+ * tick, and the SERVER enforces the gate:
+ *
+ *   two lanes can be up together iff their node sets are disjoint
+ *   (tp3 {1,3,4} + creative {2} is fine; tp4 {1,2,3,4} blocks everything).
+ *
+ * Blockers are reported, never auto-resolved. If tp3 is blocked by tp4 you pull
+ * tp4 down yourself — or tick both and use the combined swap button.
+ *
+ * A lane serving on :8000 is PRODUCTION: taking it down asks you to type its name.
  */
 
 const STATE_STYLE: Record<LaneState, { label: string; dot: string; text: string }> = {
@@ -17,39 +34,29 @@ const STATE_STYLE: Record<LaneState, { label: string; dot: string; text: string 
   down: { label: "down", dot: "bg-muted/50", text: "text-muted" },
 };
 
-function LaneRow({ lane }: { lane: LaneInfo }) {
-  const s = STATE_STYLE[lane.status] ?? STATE_STYLE.down;
-  const holders = Object.entries(lane.holders ?? {});
-  // For a down lane, the holders are the other lane(s) blocking it.
-  const blockerLanes = Array.from(new Set(holders.map(([, l]) => l)));
+const isProduction = (lane: LaneInfo) => lane.endpoint.includes(":8000");
+const JOB_POLL_MS = 1500;
+const LOG_TAIL = 14;
 
-  return (
-    <div className="flex flex-col gap-1 border-t border-border px-1 py-2 first:border-t-0">
-      <div className="flex items-center gap-2">
-        <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
-        <span className="font-tabular text-[13px] font-semibold text-text">{lane.id}</span>
-        <span className="text-[11px] text-muted">{lane.nodes.join(", ")}</span>
-        <span className={`ml-auto font-tabular text-[11px] font-medium ${s.text}`}>{s.label}</span>
-      </div>
-      <div className="pl-4 flex flex-wrap items-center gap-x-3 gap-y-0.5 text-[11px] text-muted">
-        <span className="font-tabular">{lane.endpoint}</span>
-        <span className="truncate" title={lane.model}>
-          {lane.model}
-        </span>
-      </div>
-      {lane.status !== "up" && blockerLanes.length > 0 && (
-        <div className="pl-4 text-[11px] text-warning">
-          blocked by {blockerLanes.join(", ")} — {holders.map(([n, l]) => `${n}:${l}`).join(" ")}
-        </div>
-      )}
-    </div>
-  );
+interface Dialog {
+  kind: "down" | "swap";
+  down: string[];
+  up: string[];
+  /** lane the user must type to confirm (production :8000), else null */
+  typeName: string | null;
+  blocked?: string[];
 }
 
 export function LaneControlPanel() {
   const [lanes, setLanes] = useState<LaneInfo[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [plan, setPlan] = useState<LanePlan | null>(null);
+  const [job, setJob] = useState<LaneJob | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [dialog, setDialog] = useState<Dialog | null>(null);
+  const [typed, setTyped] = useState("");
 
   const load = useCallback(async (force = false) => {
     if (force) setRefreshing(true);
@@ -66,12 +73,97 @@ export function LaneControlPanel() {
 
   useEffect(() => {
     void load();
-    // The server caches the harness call for ~20s, so a 20s poll stays on cache.
+    // The server caches the harness call ~20s, so a 20s poll stays on cache.
     const t = setInterval(() => void load(), 20_000);
     return () => clearInterval(t);
   }, [load]);
 
-  const anyUp = (lanes ?? []).some((l) => l.status === "up");
+  const byId = useMemo(() => new Map((lanes ?? []).map((l) => [l.id, l])), [lanes]);
+  const upSel = useMemo(
+    () => [...selected].filter((id) => byId.get(id)?.status !== "up"),
+    [selected, byId],
+  );
+  const downSel = useMemo(
+    () => [...selected].filter((id) => byId.get(id)?.status === "up"),
+    [selected, byId],
+  );
+
+  // Live gate preview. It dry-runs the INTENDED action, which depends on the
+// selection: with nothing ticked for teardown it is "bring these up"; with a lane
+// also ticked for teardown it is the swap (down frees the nodes first).
+  const planKey = `${upSel.join(",")}|${downSel.join(",")}`;
+  useEffect(() => {
+    if (!upSel.length) {
+      setPlan(null);
+      return;
+    }
+    let cancelled = false;
+    void checkLanes(upSel, downSel).then(
+      (p) => !cancelled && setPlan(p),
+      () => !cancelled && setPlan(null),
+    );
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [planKey]);
+
+  const clearSelection = () => setSelected(new Set());
+
+  /** Poll a started job until it leaves "running", then refresh the lane view. */
+  const watch = useCallback(
+    async (jobId: string) => {
+      for (;;) {
+        let j: LaneJob;
+        try {
+          j = await fetchLaneJob(jobId);
+        } catch {
+          break;
+        }
+        setJob(j);
+        if (j.status !== "running") {
+          await load(true);
+          break;
+        }
+        await new Promise((r) => setTimeout(r, JOB_POLL_MS));
+      }
+      setBusy(false);
+      void load(true);
+    },
+    [load],
+  );
+
+  const run = useCallback(
+    async (fn: () => Promise<{ jobId: string; job: LaneJob }>) => {
+      setBusy(true);
+      setError(null);
+      setDialog(null);
+      setTyped("");
+      try {
+        const { jobId } = await fn();
+        await watch(jobId);
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+        setBusy(false);
+      }
+    },
+    [watch],
+  );
+
+  const onToggle = (id: string, checked: boolean) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(id);
+      else next.delete(id);
+      return next;
+    });
+  };
+
+  const blockedText = (plan?.blocked ?? []).map((b) =>
+    b.reason === "node-held"
+      ? `${b.lane} needs ${b.node}, held by ${b.holder}`
+      : `${(b.lanes ?? []).join(" + ")} share ${(b.nodes ?? []).join(",")}`,
+  );
 
   return (
     <Panel
@@ -92,21 +184,295 @@ export function LaneControlPanel() {
       }
     >
       {error && (
-        <p className="rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-text">
+        <p className="mb-2 rounded-md border border-danger/40 bg-danger/10 px-3 py-2 text-[11px] text-text">
           {error}
         </p>
       )}
       {!lanes && !error && <p className="text-xs text-muted">Reading lanes…</p>}
+
       {lanes && (
         <div className="flex flex-col">
-          {lanes.map((l) => (
-            <LaneRow key={l.id} lane={l} />
+          {lanes.map((lane) => (
+            <LaneRow
+              key={lane.id}
+              lane={lane}
+              checked={selected.has(lane.id)}
+              onToggle={(c) => onToggle(lane.id, c)}
+              disabled={busy}
+              onVerify={() => void run(() => laneVerify(lane.id))}
+            />
           ))}
-          {!anyUp && (
-            <p className="mt-1 text-[11px] text-muted">No lane serving right now.</p>
-          )}
         </div>
       )}
+
+      {/* Gate preview + actions */}
+      {lanes && (
+        <div className="mt-3 flex flex-col gap-2 border-t border-border pt-3">
+          {upSel.length > 0 && plan && (
+            <p
+              className={`text-[11px] ${plan.launchable ? "text-success" : "text-warning"}`}
+              title={blockedText.join("\n")}
+            >
+              {plan.launchable
+                ? `✓ ${upSel.join(", ")} can be brought up together`
+                : `✗ blocked: ${blockedText.join("; ")}`}
+            </p>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              type="button"
+              disabled={busy || !upSel.length || !plan?.launchable || downSel.length > 0}
+              onClick={() => void run(() => batchLanes(upSel, []))}
+              className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1 text-[11px] transition-colors hover:bg-surface-hover disabled:opacity-40"
+            >
+              <PowerOnIcon className="h-3 w-3" />
+              Put up selected{upSel.length ? ` (${upSel.length})` : ""}
+            </button>
+            <button
+              type="button"
+              disabled={busy || !downSel.length}
+              onClick={() => {
+                const prod = downSel.find((id) => byId.get(id) && isProduction(byId.get(id)!));
+                setTyped("");
+                setDialog({ kind: "down", down: downSel, up: [], typeName: prod ?? null });
+              }}
+              className="flex items-center gap-1 rounded-md border border-border bg-surface-elevated px-2.5 py-1 text-[11px] transition-colors hover:bg-surface-hover disabled:opacity-40"
+            >
+              <PowerOffIcon className="h-3 w-3" />
+              Pull down selected{downSel.length ? ` (${downSel.length})` : ""}
+            </button>
+            {downSel.length > 0 && upSel.length > 0 && (
+              <button
+                type="button"
+                disabled={busy || !plan?.launchable}
+                onClick={() => {
+                  const prod = downSel.find((id) => byId.get(id) && isProduction(byId.get(id)!));
+                  setTyped("");
+                  setDialog({ kind: "swap", down: downSel, up: upSel, typeName: prod ?? null });
+                }}
+                className="flex items-center gap-1 rounded-md border border-accent/50 bg-accent/10 px-2.5 py-1 text-[11px] transition-colors hover:bg-accent/20 disabled:opacity-40"
+              >
+                Swap: down {downSel.length} → up {upSel.length}
+              </button>
+            )}
+            {selected.size > 0 && (
+              <button
+                type="button"
+                onClick={clearSelection}
+                className="text-[11px] text-muted underline-offset-2 hover:text-text hover:underline"
+              >
+                clear
+              </button>
+            )}
+            {!selected.size && (
+              <span className="text-[11px] text-muted">
+                Tick lanes to control them, then choose an action.
+              </span>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Confirm dialog */}
+      {dialog && (
+        <ConfirmDialog
+          dialog={dialog}
+          typed={typed}
+          onTyped={setTyped}
+          onCancel={() => setDialog(null)}
+          onConfirm={() => {
+            const { kind, down, up } = dialog;
+            void run(() =>
+              kind === "swap"
+                ? batchLanes(up, down, true)
+                : batchLanes([], down, true),
+            );
+          }}
+        />
+      )}
+
+      {/* Live job */}
+      {job && <JobView job={job} onCancel={() => void cancelLaneJob(job.jobId)} />}
     </Panel>
+  );
+}
+
+function LaneRow({
+  lane,
+  checked,
+  onToggle,
+  disabled,
+  onVerify,
+}: {
+  lane: LaneInfo;
+  checked: boolean;
+  onToggle: (checked: boolean) => void;
+  disabled: boolean;
+  onVerify: () => void;
+}) {
+  const s = STATE_STYLE[lane.status] ?? STATE_STYLE.down;
+  const holders = Object.entries(lane.holders ?? {});
+  const blockers = Array.from(new Set(holders.map(([, l]) => l)));
+  const prod = isProduction(lane);
+
+  return (
+    <div className="flex flex-col gap-1 border-t border-border px-1 py-2 first:border-t-0">
+      <div className="flex items-center gap-2">
+        <input
+          type="checkbox"
+          checked={checked}
+          disabled={disabled}
+          onChange={(e) => onToggle(e.target.checked)}
+          aria-label={`select ${lane.id}`}
+          className="h-3.5 w-3.5 shrink-0 accent-accent"
+        />
+        <span className={`h-2 w-2 shrink-0 rounded-full ${s.dot}`} />
+        <span className="font-tabular text-[13px] font-semibold text-text">{lane.id}</span>
+        {prod && (
+          <span className="rounded border border-warning/50 bg-warning/10 px-1 text-[10px] text-warning">
+            PROD
+          </span>
+        )}
+        <span className="text-[11px] text-muted">{lane.nodes.join(", ")}</span>
+        <span className={`ml-auto font-tabular text-[11px] font-medium ${s.text}`}>{s.label}</span>
+        <button
+          type="button"
+          onClick={onVerify}
+          disabled={disabled}
+          title="Read-only health check: endpoint + real chat canary. Changes nothing."
+          className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover hover:text-text disabled:opacity-40"
+        >
+          verify
+        </button>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-6 text-[11px] text-muted">
+        <span className="font-tabular">{lane.endpoint}</span>
+        <span className="truncate" title={lane.model}>
+          {lane.model}
+        </span>
+      </div>
+      {lane.status !== "up" && blockers.length > 0 && (
+        <div className="pl-6 text-[11px] text-warning">
+          blocked by {blockers.join(", ")} — {holders.map(([n, l]) => `${n}:${l}`).join(" ")}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ConfirmDialog({
+  dialog,
+  typed,
+  onTyped,
+  onCancel,
+  onConfirm,
+}: {
+  dialog: Dialog;
+  typed: string;
+  onTyped: (v: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  const needsType = Boolean(dialog.typeName);
+  const ready = !needsType || typed.trim() === dialog.typeName;
+
+  return (
+    <div className="mt-3 rounded-md border border-warning/50 bg-warning/10 p-3">
+      <p className="text-[12px] font-semibold text-text">
+        Take down {dialog.down.join(", ")}
+        {dialog.up.length ? ` and bring up ${dialog.up.join(", ")}` : ""}?
+      </p>
+      <p className="mt-1 text-[11px] text-muted">
+        This stops the model serving on those nodes. Lanes come back up only when you
+        ask — nothing rotates on its own.
+      </p>
+      {needsType && (
+        <label className="mt-2 block text-[11px] text-warning">
+          <span className="font-semibold">{dialog.typeName} is production (:8000).</span> Type the
+          lane name to confirm:
+          <input
+            value={typed}
+            onChange={(e) => onTyped(e.target.value)}
+            placeholder={dialog.typeName ?? ""}
+            className="mt-1 w-full rounded border border-border bg-surface px-2 py-1 font-tabular text-[12px] text-text"
+          />
+        </label>
+      )}
+      <div className="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          disabled={!ready}
+          onClick={onConfirm}
+          className="rounded-md border border-danger/60 bg-danger/15 px-2.5 py-1 text-[11px] font-medium text-text transition-colors hover:bg-danger/25 disabled:opacity-40"
+        >
+          Confirm
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          className="rounded-md border border-border px-2.5 py-1 text-[11px] text-muted transition-colors hover:bg-surface-hover hover:text-text"
+        >
+          Cancel
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function JobView({ job, onCancel }: { job: LaneJob; onCancel: () => void }) {
+  const logRef = useRef<HTMLPreElement>(null);
+  const lines = job.progress.log ?? [];
+
+  useEffect(() => {
+    logRef.current?.scrollTo({ top: logRef.current.scrollHeight });
+  }, [lines.length]);
+
+  const tone =
+    job.status === "running"
+      ? "text-warning"
+      : job.status === "completed"
+        ? "text-success"
+        : "text-danger";
+
+  return (
+    <div className="mt-3 rounded-md border border-border bg-surface-elevated p-2.5">
+      <div className="flex items-center gap-2">
+        <span className={`text-[11px] font-semibold ${tone}`}>{job.status.toUpperCase()}</span>
+        <span className="font-tabular text-[11px] text-muted">
+          {job.verb === "batch"
+            ? `down ${job.down.join(",") || "—"} → up ${job.up.join(",") || "—"}`
+            : `${job.verb} ${job.lane}`}
+        </span>
+        {job.status === "running" && (
+          <button
+            type="button"
+            onClick={onCancel}
+            className="ml-auto rounded border border-border px-2 py-0.5 text-[10px] text-muted transition-colors hover:bg-surface-hover hover:text-text"
+          >
+            Cancel
+          </button>
+        )}
+      </div>
+      {job.progress.step && (
+        <p className="mt-1 font-tabular text-[11px] text-text">{job.progress.step}</p>
+      )}
+      {job.steps.length > 0 && (
+        <div className="mt-1 flex flex-wrap gap-x-3 text-[11px]">
+          {job.steps.map((s, i) => (
+            <span key={i} className={s.ok ? "text-success" : "text-danger"}>
+              {s.ok ? "✓" : "✗"} {s.verb} {s.lane}
+            </span>
+          ))}
+        </div>
+      )}
+      {lines.length > 0 && (
+        <pre
+          ref={logRef}
+          className="mt-1.5 max-h-40 overflow-y-auto rounded bg-surface p-2 font-mono text-[10px] leading-relaxed text-muted"
+        >
+          {lines.slice(-LOG_TAIL).join("\n")}
+        </pre>
+      )}
+    </div>
   );
 }

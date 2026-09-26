@@ -799,3 +799,52 @@ export interface LaneStatusResponse {
   nodes: Record<string, string>;
   lanes: LaneInfo[];
 }
+
+// ─── Lane control jobs (Phase 2) ─────────────────────────
+export type LaneVerb = "up" | "down" | "verify" | "batch";
+export type LaneJobStatus = "running" | "completed" | "cancelled" | "error";
+
+export interface LaneJobStep {
+  verb: string;
+  lane: string;
+  /** process exit code; null when the step was killed (cancel/timeout) */
+  code: number | null;
+  ok: boolean;
+}
+
+export interface LaneJob {
+  jobId: string;
+  verb: LaneVerb;
+  lane: string | null;
+  up: string[];
+  down: string[];
+  source: string;
+  status: LaneJobStatus;
+  startedAt: number;
+  completedAt: number | null;
+  progress: { step: string; message: string; log?: string[] };
+  steps: LaneJobStep[];
+  result: { ok: boolean | null };
+  error: string | null;
+}
+
+export interface LaneJobsResponse {
+  active: LaneJob | null;
+  history: LaneJob[];
+}
+
+/** One entry from the node-disjointness gate (spec §2.5). */
+export interface LaneBlock {
+  reason: "node-held" | "mutual-overlap";
+  lane?: string;
+  node?: string;
+  holder?: string;
+  lanes?: string[];
+  nodes?: string[];
+}
+
+export interface LanePlan {
+  launchable: boolean;
+  blocked: LaneBlock[];
+  freed: string[];
+}

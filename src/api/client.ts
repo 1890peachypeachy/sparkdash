@@ -4,6 +4,9 @@ import type {
   HermesBatchUpdateResponse,
   HermesUpdatesResponse,
   LaneInfo,
+  LaneJob,
+  LaneJobsResponse,
+  LanePlan,
   LaneStatusResponse,
   LlmMetrics,
   LlmDailyResponse,
@@ -396,4 +399,68 @@ export function listLanes(force = false): Promise<{ lanes: LaneInfo[] }> {
 /** Live per-node census + per-lane status. */
 export function laneStatus(force = false): Promise<LaneStatusResponse> {
   return apiFetch(`/api/lanes/status${force ? "?force=1" : ""}`);
+}
+
+// ─── Lane control actions (Phase 2) ───────────────────────
+// Every mutation goes through the harness via the server. The server owns the
+// node-disjointness gate and fleet-wide single-flight; the UI only requests.
+
+/** Dry-run the node-disjointness gate so the UI can preview before acting. */
+export function checkLanes(up: string[], down: string[] = []): Promise<LanePlan> {
+  return apiFetch("/api/lanes/check", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ up, down }),
+  });
+}
+
+/** Multi-select: take some lanes down and/or bring some up as one gated action. */
+export function batchLanes(up: string[], down: string[], confirm = false): Promise<{ jobId: string; job: LaneJob }> {
+  return apiFetch("/api/lanes/batch", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ up, down, confirm }),
+  });
+}
+
+export function laneUp(lane: string): Promise<{ jobId: string; job: LaneJob }> {
+  return apiFetch(`/api/lanes/${encodeURIComponent(lane)}/up`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
+/** Destructive: the server rejects this without `confirm: true`. */
+export function laneDown(lane: string): Promise<{ jobId: string; job: LaneJob }> {
+  return apiFetch(`/api/lanes/${encodeURIComponent(lane)}/down`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ confirm: true }),
+  });
+}
+
+export function laneVerify(lane: string): Promise<{ jobId: string; job: LaneJob }> {
+  return apiFetch(`/api/lanes/${encodeURIComponent(lane)}/verify`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
+}
+
+/** Poll one job (includes the live harness log while it runs). */
+export function laneJob(jobId: string): Promise<LaneJob> {
+  return apiFetch(`/api/lanes/jobs/${encodeURIComponent(jobId)}`);
+}
+
+export function laneJobs(): Promise<LaneJobsResponse> {
+  return apiFetch("/api/lanes/jobs");
+}
+
+export function cancelLaneJob(jobId: string): Promise<{ jobId: string; status: string }> {
+  return apiFetch(`/api/lanes/jobs/${encodeURIComponent(jobId)}/cancel`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({}),
+  });
 }
