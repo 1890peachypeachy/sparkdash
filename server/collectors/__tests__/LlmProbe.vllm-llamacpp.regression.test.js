@@ -5,6 +5,7 @@ import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { LlmProbe } from "../LlmProbe.js";
 import { readServerGenerationTokens } from "../LlmStreaming.js";
+import { assertRate } from "./helpers/assertRate.js";
 
 const VLLM_METRICS = `vllm:prompt_tokens_total{engine="0"} 1000.0
 vllm:generation_tokens_total{engine="0"} 500.0
@@ -260,8 +261,8 @@ test("llama.cpp probe: slot deltas → tok/s; props for model", async () => {
   assert.equal(snap.contextLength, 32768);
   assert.equal(snap.slotsTotal, 1);
   assert.equal(snap.slotsActive, 1);
-  assert.equal(snap.generationTps, 20); // (50-10)/2
-  assert.equal(snap.prefillTps, 10); // (25-5)/2
+  assertRate(snap.generationTps, 20, "generationTps"); // (50-10)/2s
+  assertRate(snap.prefillTps, 10, "prefillTps"); // (25-5)/2s
   assert.equal(snap.totalOutputTokens, 50);
   assert.equal(snap.available, true);
   assert.equal(snap.cachedPrefillTps, null);
@@ -294,9 +295,9 @@ test("llama.cpp probe: n_prompt_tokens_cache → cached vs uncached prefill", as
     return jsonRes({}, 404);
   };
   const snap = await probe.probe();
-  assert.equal(snap.prefillTps, 10); // processed (25-5)/2
-  assert.equal(snap.uncachedPrefillTps, 10); // (25-5)/2
-  assert.equal(snap.cachedPrefillTps, 15); // (40-10)/2
+  assertRate(snap.prefillTps, 10, "prefillTps"); // processed (25-5)/2s
+  assertRate(snap.uncachedPrefillTps, 10, "uncachedPrefillTps"); // (25-5)/2s
+  assertRate(snap.cachedPrefillTps, 15, "cachedPrefillTps"); // (40-10)/2s
 });
 
 test("llama.cpp: n_prompt_tokens_processed 0 is not treated as missing", async () => {

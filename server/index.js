@@ -191,8 +191,10 @@ function asLaneList(v) {
 /** Dry-run the node-disjointness gate — powers the live UI preview. */
 app.post("/api/lanes/check", async (req, res) => {
   try {
-    const { up = [], down = [] } = req.body || {};
-    res.json(await laneManager.plan({ up, down }));
+    const up = asLaneList((req.body || {}).up);
+    const down = asLaneList((req.body || {}).down);
+    const { inventory, ...verdict } = await laneManager.plan({ up, down });
+    res.json(verdict); // inventory is an internal snapshot, not part of the contract
   } catch (e) {
     laneError(res, e);
   }
@@ -215,7 +217,10 @@ app.post("/api/lanes/batch", async (req, res) => {
         .status(409)
         .json({ error: "that selection can't be launched", blocked: plan.blocked });
     }
-    const job = await laneManager.start({ verb: "batch", up, down, source: "api" });
+    const job = await laneManager.start(
+      { verb: "batch", up, down, source: "api" },
+      { inventory: plan.inventory },
+    );
     res.status(202).json({ jobId: job.jobId, job });
   } catch (e) {
     laneError(res, e);
@@ -249,7 +254,10 @@ app.post("/api/lanes/:lane/up", async (req, res) => {
         .status(409)
         .json({ error: `${req.params.lane} can't be brought up`, blocked: plan.blocked });
     }
-    const job = await laneManager.start({ verb: "up", lane: req.params.lane, source: "api" });
+    const job = await laneManager.start(
+      { verb: "up", lane: req.params.lane, source: "api" },
+      { inventory: plan.inventory },
+    );
     res.status(202).json({ jobId: job.jobId, job });
   } catch (e) {
     laneError(res, e);

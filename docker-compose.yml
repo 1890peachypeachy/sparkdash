@@ -40,7 +40,11 @@ services:
       # SSH_IDENTITY_FILE to the path inside the container.
       # - ${HOME}/.ssh/id_ed25519:/root/.ssh/id_ed25519:ro
     environment:
-      - BIND_HOST=0.0.0.0
+      # Loopback by default: with network_mode: host, 0.0.0.0 puts the
+      # UNAUTHENTICATED lane-control endpoints (POST /api/lanes/batch can take
+      # production inference down) on the LAN. Set 0.0.0.0 deliberately, behind a
+      # trusted network, only if you understand that.
+      - BIND_HOST=127.0.0.1
       - PORT=5555
       - LLM_PORT=8888
       - NODE_ENV=production

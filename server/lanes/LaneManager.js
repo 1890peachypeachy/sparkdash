@@ -50,7 +50,7 @@ function appendLog(job, chunk) {
 }
 
 export class LaneManager {
-  constructor(auditPath = path.join(ROOT, "logs", "lane-control.jsonl")) {
+  constructor(auditPath = process.env.LANE_AUDIT_PATH || path.join(ROOT, "logs", "lane-control.jsonl")) {
     /** @type {Map<string, object>} */
     this.jobs = new Map();
     /** @type {object[]} finished jobs, newest first */
@@ -75,7 +75,14 @@ export class LaneManager {
 
   /** Active job (if any) + recent history. */
   list() {
-    return { active: this.getActive(), history: this.history.slice(0, HISTORY_LIMIT) };
+    return {
+      active: this.getActive(),
+      // True during the validation window between start() being called and the job
+      // existing: `active` is still null then, so without this a client sees
+      // "nothing running" while a second attempt is correctly refused with 409.
+      reserving: this.active === RESERVING,
+      history: this.history.slice(0, HISTORY_LIMIT),
+    };
   }
 
   /**
@@ -142,6 +149,10 @@ export class LaneManager {
       freed: inventory
         .filter((l) => downSet.has(l.id) && l.status === "up")
         .flatMap((l) => l.nodes),
+      // The snapshot this verdict was computed from. Pass it to start() so the job
+      // is validated against the SAME read the gate approved — one fleet sweep
+      // instead of two, and no window between the two reads.
+      inventory,
     };
   }
 
@@ -149,7 +160,7 @@ export class LaneManager {
    * Start a job. Throws 409 while another job is running (fleet-wide single-flight).
    * @param {{verb: string, lane?: string, up?: string[], down?: string[], source?: string}} req
    */
-  async start(req) {
+  async start(req, { inventory: providedInventory = null } = {}) {
     if (this.active) {
       const err = new Error("A lane operation is already running");
       err.status = 409;
@@ -174,8 +185,10 @@ export class LaneManager {
       }
 
       // Validate lanes against the harness inventory before doing anything.
-      // force:true — never validate a destructive action against a cached fleet.
-      const inventory = await getLaneInventory({ force: true });
+      // Reuse the gate's snapshot when the caller supplied one (same read, one
+      // sweep); otherwise force a fresh read — never validate a destructive action
+      // against a cached fleet.
+      const inventory = providedInventory || (await getLaneInventory({ force: true }));
       const known = new Set(inventory.map((l) => l.id));
       const lanes = isBatch ? [...new Set([...(req.up || []), ...(req.down || [])])] : [req.lane];
       const unknown = lanes.filter((id) => id && !known.has(id));
@@ -200,8 +213,10 @@ export class LaneManager {
         jobId,
         verb: isBatch ? "batch" : verb,
         lane: isBatch ? null : req.lane,
-        up: isBatch ? (req.up || []) : [],
-        down: isBatch ? (req.down || []) : [],
+        // Deduped: the gate and the id validation both collapse duplicates, so an
+        // ["a","a"] payload must not run the same lane twice in one action.
+        up: isBatch ? [...new Set(req.up || [])] : [],
+        down: isBatch ? [...new Set(req.down || [])] : [],
         source: req.source || "api",
         status: "running",
         startedAt: Date.now(),
@@ -254,29 +269,48 @@ export class LaneManager {
         env: process.env,
       });
       job._child = child;
-      child.stdout.on("data", (b) => appendLog(job, b));
-      child.stderr.on("data", (b) => appendLog(job, b));
-      const timer = setTimeout(() => {
+
+      // Node can emit 'error' and *then* 'close' for the same failure; without this
+      // guard the step is recorded twice and the UI renders a duplicate ✗ line.
+      let settled = false;
+      let timer = null;
+      const finish = (code, ok, note) => {
+        if (settled) return;
+        settled = true;
+        if (timer) clearTimeout(timer);
+        if (!ok) job._failed = true;
+        job.steps.push({ verb, lane, code, ok });
+        job.progress.message = note;
+        resolve(code);
+      };
+
+      // The deadline MUST settle here rather than waiting on 'close'. Node emits
+      // 'close' only once the stdio pipes shut, and a detached grandchild can hold
+      // them open long after the direct child exits — leaving this promise pending,
+      // _run's finally unreachable, and `this.active` set forever: a permanent fleet
+      // lockout that cancel() cannot clear (the direct child is already gone).
+      // exit 124 mirrors timeout(1).
+      timer = setTimeout(() => {
         appendLog(job, `\n[timeout] killing ${verb} ${lane} after ${SPARK_LANE_TIMEOUT_MS}ms`);
         try {
           child.kill("SIGKILL");
         } catch {
           /* ignore */
         }
+        // Disown the child so a late 'close' can't double-record and its pipes can't
+        // keep the event loop alive.
+        try {
+          child.stdout?.destroy();
+          child.stderr?.destroy();
+          child.unref();
+        } catch {
+          /* ignore */
+        }
+        finish(124, false, `${verb} ${lane} timed out after ${SPARK_LANE_TIMEOUT_MS}ms`);
       }, SPARK_LANE_TIMEOUT_MS);
 
-      // Node can emit 'error' and *then* 'close' for the same failure. Without this
-      // guard the step is recorded twice and the UI renders a duplicate ✗ line.
-      let settled = false;
-      const finish = (code, ok, note) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        if (!ok) job._failed = true;
-        job.steps.push({ verb, lane, code, ok });
-        job.progress.message = note;
-        resolve(code);
-      };
+      child.stdout.on("data", (b) => appendLog(job, b));
+      child.stderr.on("data", (b) => appendLog(job, b));
       child.on("error", (e) => {
         appendLog(job, `[spawn error] ${e.message}`);
         finish(-1, false, `${verb} ${lane} spawn failed`);

@@ -4,6 +4,7 @@
 import { test } from "node:test";
 import { strict as assert } from "node:assert";
 import { LlmProbe } from "../LlmProbe.js";
+import { assertRate } from "./helpers/assertRate.js";
 
 function jsonRes(body, status = 200) {
   return {
@@ -156,7 +157,7 @@ test("probe: exl3 path does not mislabel as vllm", async () => {
   };
   const snap = await probe.probe();
   assert.equal(snap.backend, "exl3");
-  assert.equal(snap.generationTps, 20);
-  assert.equal(snap.prefillTps, 20);
+  assertRate(snap.generationTps, 20, "generationTps"); // (90-50)/2s
+  assertRate(snap.prefillTps, 20, "prefillTps"); // (140-100)/2s
   assert.equal(snap.available, true);
 });
