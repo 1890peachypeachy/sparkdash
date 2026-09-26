@@ -71,6 +71,7 @@ function invocations() {
 function reset() {
   fs.writeFileSync(LOG, "");
   setState(TWO_UP);
+  delete process.env.LANE_STUB_SLOW_LANE;
 }
 
 /**
@@ -239,6 +240,90 @@ test("job payloads do not leak internal fields", async () => {
     assert.ok(!(field in job), `${field} must not be serialised`);
   }
   await waitDone(lm, job.jobId);
+});
+
+// ---------------------------------------------------------------------------
+// Cancel returns the fleet to a FREE state
+// ---------------------------------------------------------------------------
+
+/** Start a job, cancel it mid-step, and wait for it to finalise. */
+async function startThenCancel(lm, req, waitMs = 400) {
+  const job = await lm.start(req);
+  await new Promise((r) => setTimeout(r, waitMs));
+  lm.cancel(job.jobId);
+  return waitDone(lm, job.jobId, 8000);
+}
+
+test("cancel during a swap takes back down the lane it was bringing up", async () => {
+  reset();
+  // A slow teardown means the cancel lands before any bring-up has started — the
+  // case that used to strand the fleet with the old lanes down and nothing serving.
+  process.env.LANE_STUB_SLOW_LANE = "tp3";
+  const lm = new LaneManager();
+
+  const done = await startThenCancel(lm, { verb: "batch", up: ["tp4"], down: ["tp3", "creative"] });
+
+  assert.equal(done.status, "cancelled");
+  assert.ok(
+    invocations().some((l) => l.includes("INVOKED down tp4")),
+    `expected the undo to take tp4 back down, got ${JSON.stringify(invocations())}`,
+  );
+  assert.deepEqual(done.rollback?.lanes, ["tp4"]);
+  assert.deepEqual(done.rollback?.failed, []);
+});
+
+test("cancel of a plain up takes that lane back down", async () => {
+  reset();
+  process.env.LANE_STUB_SLOW_LANE = "tp4";
+  const lm = new LaneManager();
+
+  const done = await startThenCancel(lm, { verb: "up", lane: "tp4" });
+
+  assert.equal(done.status, "cancelled");
+  assert.ok(invocations().some((l) => l.includes("INVOKED down tp4")));
+  assert.deepEqual(done.rollback?.lanes, ["tp4"]);
+});
+
+test("rollback steps are flagged so the UI can mark them as recovery", async () => {
+  reset();
+  process.env.LANE_STUB_SLOW_LANE = "tp4";
+  const lm = new LaneManager();
+
+  const done = await startThenCancel(lm, { verb: "up", lane: "tp4" });
+
+  const undo = done.steps.filter((s) => s.rollback);
+  assert.equal(undo.length, 1, "exactly one undo step");
+  assert.equal(undo[0].verb, "down");
+  assert.equal(undo[0].lane, "tp4");
+});
+
+test("cancelling a down-only job rolls nothing back (nothing was brought up)", async () => {
+  reset();
+  process.env.LANE_STUB_SLOW_LANE = "tp3";
+  const lm = new LaneManager();
+
+  const done = await startThenCancel(lm, { verb: "batch", up: [], down: ["tp3"] });
+
+  assert.equal(done.status, "cancelled");
+  assert.equal(done.rollback, undefined, "no undo is owed when nothing came up");
+  assert.ok(
+    !invocations().some((l) => l.includes("INVOKED up ")),
+    "a teardown-only job must not start a bring-up",
+  );
+});
+
+test("a completed job is never rolled back", async () => {
+  reset();
+  const lm = new LaneManager();
+  const job = await lm.start({ verb: "up", lane: "tp3" });
+  const done = await waitDone(lm, job.jobId);
+
+  assert.equal(done.status, "completed");
+  assert.equal(done.rollback, undefined);
+  assert.ok(
+    !invocations().some((l) => l.includes("INVOKED down ")),
+    "a job that finished normally must leave its lane up",
+  );
 });
 
 // ---------------------------------------------------------------------------

@@ -810,6 +810,8 @@ export interface LaneJobStep {
   /** process exit code; null when the step was killed (cancel/timeout) */
   code: number | null;
   ok: boolean;
+  /** true for steps the manager ran itself to undo a cancelled job */
+  rollback?: boolean;
 }
 
 export interface LaneJob {
@@ -826,10 +828,14 @@ export interface LaneJob {
   steps: LaneJobStep[];
   result: { ok: boolean | null };
   error: string | null;
+  /** present on a cancelled job: what the manager took back down to reach free */
+  rollback?: { lanes: string[]; failed: string[] };
 }
 
 export interface LaneJobsResponse {
   active: LaneJob | null;
+  /** true while start() is validating, before a job exists */
+  reserving?: boolean;
   history: LaneJob[];
 }
 

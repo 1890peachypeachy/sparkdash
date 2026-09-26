@@ -397,8 +397,8 @@ function ConfirmDialog({
       {isSwap && (
         <p className="mt-1 rounded border border-warning/40 px-2 py-1 text-[11px] text-warning">
           Swap runs in order: {dialog.down.join(", ")} goes down first, then{" "}
-          {dialog.up.join(", ")} comes up. Cancelling after the teardown finishes leaves those
-          nodes <strong>not serving</strong> — bring a lane back up before you walk away.
+          {dialog.up.join(", ")} comes up. If you cancel, {dialog.up.join(", ")} is taken
+          back down too — those nodes end up <strong>free</strong>, nothing serving.
         </p>
       )}
       {required.length > 0 && (
@@ -450,7 +450,9 @@ function JobView({ job, onCancel }: { job: LaneJob; onCancel: () => void }) {
       ? "text-warning"
       : job.status === "completed"
         ? "text-success"
-        : "text-danger";
+        : job.status === "cancelled"
+          ? "text-muted" // an intentional stop, not a failure
+          : "text-danger";
 
   return (
     <div className="mt-3 rounded-md border border-border bg-surface-elevated p-2.5">
@@ -479,9 +481,17 @@ function JobView({ job, onCancel }: { job: LaneJob; onCancel: () => void }) {
           {job.steps.map((s, i) => (
             <span key={i} className={s.ok ? "text-success" : "text-danger"}>
               {s.ok ? "✓" : "✗"} {s.verb} {s.lane}
+              {s.rollback && <span className="text-muted"> (undo)</span>}
             </span>
           ))}
         </div>
+      )}
+      {job.rollback && (
+        <p className="mt-1 text-[11px] text-muted">
+          {job.rollback.failed.length
+            ? `Undo failed for ${job.rollback.failed.join(", ")} — those may still be up.`
+            : `Undo complete — ${job.rollback.lanes.join(", ")} taken back down; nodes free.`}
+        </p>
       )}
       {lines.length > 0 && (
         <pre

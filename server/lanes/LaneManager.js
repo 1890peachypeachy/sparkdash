@@ -244,13 +244,16 @@ export class LaneManager {
     }
   }
 
-  /** SIGTERM the running child. Status finalizes in _run's finally. */
+  /**
+   * Cancel a running job. Status finalizes in _run's finally, which also returns the
+   * fleet to a free state by taking back down whatever this job brought up.
+   */
   cancel(jobId) {
     const job = this.jobs.get(jobId);
     if (!job) return null;
     if (job.status !== "running") return publicJob(job);
     job._cancelled = true;
-    job.progress.message = "Cancelling…";
+    job.progress.message = "Cancelling — returning the fleet to free…";
     try {
       job._child?.kill("SIGTERM");
     } catch {
@@ -321,6 +324,52 @@ export class LaneManager {
     });
   }
 
+  /**
+   * Lanes a cancelled job must take back down to leave the fleet free.
+   *
+   * A plain `up` job rolls back its one lane; a batch rolls back its `up` list minus
+   * anything it was itself taking down. Lanes that were already up before the job are
+   * included deliberately: the rule is "cancel leaves those nodes free", NOT "cancel
+   * restores the previous state" — the user can always bring a lane back up.
+   */
+  _rollbackTargets(job) {
+    const candidates = job.verb === "up" ? [job.lane] : job.verb === "batch" ? job.up : [];
+    const downSet = new Set(job.down || []);
+    return [...new Set(candidates)].filter((l) => l && !downSet.has(l));
+  }
+
+  /**
+   * Take back down whatever a cancelled job brought up, so a cancel mid-swap can
+   * never strand the fleet with the old lanes down, the new ones half-up, and nothing
+   * serving. Never throws: a failure here must not stop the job finalising and
+   * releasing the fleet slot. Rollback steps carry `rollback: true` so the UI can
+   * show them as recovery rather than as something the user asked for.
+   */
+  async _rollback(job) {
+    const targets = this._rollbackTargets(job);
+    if (!targets.length) return;
+    const failed = [];
+    appendLog(job, `\n[cancel] returning to free: taking down ${targets.join(", ")}`);
+    for (const lane of targets) {
+      try {
+        const code = await this._execStep(job, "down", lane);
+        const step = job.steps[job.steps.length - 1];
+        if (step) step.rollback = true;
+        if (code !== 0) failed.push(lane);
+      } catch (e) {
+        failed.push(lane);
+        appendLog(job, `[cancel] rollback of ${lane} threw: ${e?.message || e}`);
+      }
+    }
+    job.rollback = { lanes: targets, failed };
+    if (failed.length) {
+      job.progress.message = `Cancelled — could NOT take ${failed.join(", ")} back down`;
+      appendLog(job, `[cancel] WARNING: ${failed.join(", ")} may still be up`);
+    } else {
+      job.progress.message = "Cancelled — fleet back to free";
+    }
+  }
+
   async _run(job) {
     try {
       if (job.verb === "batch") {
@@ -339,6 +388,12 @@ export class LaneManager {
     } catch (e) {
       job.error = e?.message || String(e);
     } finally {
+      // A cancelled job returns the fleet to a FREE state: whatever it brought up is
+      // taken back down, so a cancel mid-swap can never leave the old lanes down, the
+      // new ones half-up, and nothing serving. Runs inside the job, so it stays within
+      // the fleet-wide single-flight.
+      if (job._cancelled) await this._rollback(job);
+
       // Status is decided here, once, so history is written a single time.
       if (job._cancelled) job.status = "cancelled";
       else if (job.error) job.status = "error";
