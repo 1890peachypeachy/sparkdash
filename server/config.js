@@ -92,6 +92,16 @@ const SPARK_LANE_PATH =
   path.join(os.homedir(), "recipe-db", "spark-bench", "ops", "spark-lane");
 // Hard cap for a read-only `lanes --json` / `status --json` call.
 const SPARK_LANE_TIMEOUT_MS = parseInt(process.env.SPARK_LANE_TIMEOUT_MS || "60000", 10);
+// Hard cap for an actual `up`/`down` lane control invocation (LaneManager._execStep).
+// A cold multi-node build+share+doctor+serve chain can legitimately run for hours
+// (the chain's own internal "wait healthy" step uses a ceiling of 10800s = 3h) —
+// this must stay comfortably above that ceiling or the dashboard SIGKILLs a launch
+// that was still working. Bug found 2026-09-27: LaneManager previously reused the
+// 60s status-call timeout here, killing every cold multi-Spark build at the 60s mark.
+const SPARK_LANE_UP_TIMEOUT_MS = parseInt(
+  process.env.SPARK_LANE_UP_TIMEOUT_MS || "11400000", // 3h10m — 10800s chain ceiling + 10min buffer
+  10,
+);
 // The inventory shells out over SSH to every node (~7s cold). Cache longer than the
 // panel's poll interval so an auto-refresh never fans out a fresh SSH sweep.
 const LANE_STATUS_TTL_MS = parseInt(process.env.LANE_STATUS_TTL_MS || "20000", 10);
@@ -133,6 +143,7 @@ export {
   HOST_PATHS,
   SPARK_LANE_PATH,
   SPARK_LANE_TIMEOUT_MS,
+  SPARK_LANE_UP_TIMEOUT_MS,
   LANE_STATUS_TTL_MS,
   ROOT,
 };

@@ -19,7 +19,7 @@ import { spawn } from "child_process";
 import fs from "fs";
 import path from "path";
 import { randomUUID } from "crypto";
-import { ROOT, SPARK_LANE_PATH, SPARK_LANE_TIMEOUT_MS } from "../config.js";
+import { ROOT, SPARK_LANE_PATH, SPARK_LANE_TIMEOUT_MS, SPARK_LANE_UP_TIMEOUT_MS } from "../config.js";
 import { getLaneInventory } from "../collectors/LaneControl.js";
 
 const VERBS = new Set(["up", "down", "verify"]);
@@ -293,8 +293,14 @@ export class LaneManager {
       // _run's finally unreachable, and `this.active` set forever: a permanent fleet
       // lockout that cancel() cannot clear (the direct child is already gone).
       // exit 124 mirrors timeout(1).
+      // "up" can trigger a cold multi-node build+share+doctor+serve chain that
+      // legitimately runs for hours (its own "wait healthy" step uses a 10800s
+      // ceiling) — give it a much longer deadline than the quick down/verify
+      // steps. Bug found 2026-09-27: this used to reuse the 60s status-call
+      // timeout unconditionally, SIGKILLing every cold multi-Spark "up" at 60s.
+      const stepTimeoutMs = verb === "up" ? SPARK_LANE_UP_TIMEOUT_MS : SPARK_LANE_TIMEOUT_MS;
       timer = setTimeout(() => {
-        appendLog(job, `\n[timeout] killing ${verb} ${lane} after ${SPARK_LANE_TIMEOUT_MS}ms`);
+        appendLog(job, `\n[timeout] killing ${verb} ${lane} after ${stepTimeoutMs}ms`);
         try {
           child.kill("SIGKILL");
         } catch {
@@ -309,8 +315,8 @@ export class LaneManager {
         } catch {
           /* ignore */
         }
-        finish(124, false, `${verb} ${lane} timed out after ${SPARK_LANE_TIMEOUT_MS}ms`);
-      }, SPARK_LANE_TIMEOUT_MS);
+        finish(124, false, `${verb} ${lane} timed out after ${stepTimeoutMs}ms`);
+      }, stepTimeoutMs);
 
       child.stdout.on("data", (b) => appendLog(job, b));
       child.stderr.on("data", (b) => appendLog(job, b));

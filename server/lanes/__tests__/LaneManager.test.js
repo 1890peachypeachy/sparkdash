@@ -28,6 +28,10 @@ process.env.SPARK_LANE_PATH = STUB;
 process.env.LANE_STUB_LOG = LOG;
 process.env.LANE_AUDIT_PATH = AUDIT;
 process.env.SPARK_LANE_TIMEOUT_MS = "1500";
+// "up" now has its own, much longer deadline than down/verify (a cold multi-node
+// build can legitimately run for hours) — tests that exercise the timeout path
+// via an "up" job must set this too, or they'll wait for the real 3h10m default.
+process.env.SPARK_LANE_UP_TIMEOUT_MS = "1500";
 
 const { LaneManager } = await import("../LaneManager.js");
 
