@@ -37,6 +37,12 @@ function textRes(txt, status = 200) {
   };
 }
 
+function freezeProbeClock(t) {
+  const now = 10_000;
+  t.mock.method(Date, "now", () => now);
+  return now;
+}
+
 test("vLLM detect: /v1/models + vllm /metrics → vllm (not ds4/sglang)", async () => {
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
   const hits = [];
@@ -59,13 +65,14 @@ test("vLLM detect: /v1/models + vllm /metrics → vllm (not ds4/sglang)", async 
   assert.ok(!hits.includes("/get_server_info") || hits.includes("/metrics"));
 });
 
-test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm", async () => {
+test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm", async (t) => {
+  const now = freezeProbeClock(t);
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
   probe.serverIsOpenAI = true;
   probe.backendType = "vllm";
   probe.authOpen = true;
-  probe._lastDetectAt = Date.now();
-  probe.lastProbeTime = Date.now() - 2000;
+  probe._lastDetectAt = now;
+  probe.lastProbeTime = now - 2000;
   probe.lastTokenCounts = { input: 1000, output: 500 };
   const hits = [];
   probe._fetch = async (url) => {
@@ -96,11 +103,28 @@ test("vLLM probe: counter diffs + tiles; skips get_server_info when known vllm",
   assert.equal(snap.slotsActive, 2);
   assert.equal(snap.requestsWaiting, 1);
   assert.equal(snap.kvCacheUsage, 0.42);
+  assert.equal(snap.kvCacheTokens, null);
+  assert.equal(snap.kvCacheTokensAvailable, null);
+  assert.equal(snap.kvCacheGb, null); // vLLM reports no pool size
+  assert.equal(snap.weightsGb, null);
   assert.equal(snap.preemptionsTotal, 3);
   assert.equal(snap.prefixCacheHitRate, 0.5);
+  assert.equal(snap.totalCachedTokens, 10); // prefix_cache_hits_total is token-granular
   assert.equal(snap.mtpAcceptanceRate, 0.8);
   assert.equal(snap.available, true);
   assert.ok(!hits.some((h) => h.includes("get_server_info")));
+});
+
+test("vLLM: older gpu_cache_usage_perc stands in for kv_cache_usage_perc", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const legacy = VLLM_METRICS.replace("vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc");
+  probe._applyVllmMetrics(legacy, 2);
+  assert.equal(probe.kvCacheUsage, 0.42);
+  // The current name wins when both are exposed.
+  probe._applyVllmMetrics(VLLM_METRICS + 'vllm:gpu_cache_usage_perc{engine="0"} 0.99\n', 2);
+  assert.equal(probe.kvCacheUsage, 0.42);
+  probe._applyVllmMetrics(VLLM_METRICS.replace(/^vllm:kv_cache_usage_perc.*\n/m, ""), 2);
+  assert.equal(probe.kvCacheUsage, null);
 });
 
 test("vLLM idle: flat counters → 0 tok/s (not sticky gauge logic)", async () => {
@@ -220,13 +244,14 @@ test("llama.cpp detect: /slots array wins over OpenAI paths", async () => {
   assert.equal(probe.backendType, "llama.cpp");
 });
 
-test("llama.cpp probe: slot deltas → tok/s; props for model", async () => {
+test("llama.cpp probe: slot deltas → tok/s; props for model", async (t) => {
+  const now = freezeProbeClock(t);
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8080);
   probe.serverIsOpenAI = false;
   probe.backendType = "llama.cpp";
   probe.authOpen = true;
-  probe._lastDetectAt = Date.now();
-  probe.lastProbeTime = Date.now() - 2000;
+  probe._lastDetectAt = now;
+  probe.lastProbeTime = now - 2000;
   probe.slotState.set(0, { decoded: 10, prompted: 5 });
   probe._fetch = async (url) => {
     const u = String(url);
@@ -269,13 +294,14 @@ test("llama.cpp probe: slot deltas → tok/s; props for model", async () => {
   assert.equal(snap.uncachedPrefillTps, null);
 });
 
-test("llama.cpp probe: n_prompt_tokens_cache → cached vs uncached prefill", async () => {
+test("llama.cpp probe: n_prompt_tokens_cache → cached vs uncached prefill", async (t) => {
+  const now = freezeProbeClock(t);
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8080);
   probe.serverIsOpenAI = false;
   probe.backendType = "llama.cpp";
   probe.authOpen = true;
-  probe._lastDetectAt = Date.now();
-  probe.lastProbeTime = Date.now() - 2000;
+  probe._lastDetectAt = now;
+  probe.lastProbeTime = now - 2000;
   probe.slotState.set(0, { decoded: 10, prompted: 5 });
   probe.lastPrefillKinds = { cached: 10, computed: 5 };
   probe._fetch = async (url) => {
@@ -298,15 +324,17 @@ test("llama.cpp probe: n_prompt_tokens_cache → cached vs uncached prefill", as
   assertRate(snap.prefillTps, 10, "prefillTps"); // processed (25-5)/2s
   assertRate(snap.uncachedPrefillTps, 10, "uncachedPrefillTps"); // (25-5)/2s
   assertRate(snap.cachedPrefillTps, 15, "cachedPrefillTps"); // (40-10)/2s
+  assert.equal(snap.totalCachedTokens, 40); // n_prompt_tokens_cache cumulative
 });
 
-test("llama.cpp: n_prompt_tokens_processed 0 is not treated as missing", async () => {
+test("llama.cpp: n_prompt_tokens_processed 0 is not treated as missing", async (t) => {
+  const now = freezeProbeClock(t);
   const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8080);
   probe.serverIsOpenAI = false;
   probe.backendType = "llama.cpp";
   probe.authOpen = true;
-  probe._lastDetectAt = Date.now();
-  probe.lastProbeTime = Date.now() - 2000;
+  probe._lastDetectAt = now;
+  probe.lastProbeTime = now - 2000;
   probe.slotState.set(0, { decoded: 10, prompted: 0 });
   probe.lastPrefillKinds = { cached: 10, computed: 0 };
   probe._fetch = async (url) => {
@@ -383,4 +411,32 @@ test("known llama.cpp redetect still uses /slots (not forced OpenAI)", async () 
   assert.equal(probe.backendType, "llama.cpp");
   assert.equal(probe.serverIsOpenAI, false);
   assert.ok(hits.includes("/slots"));
+});
+
+test("vLLM cache_config_info: free tokens from pool size and usage", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  const body = [
+    'vllm:kv_cache_usage_perc{engine="0",model_name="m"} 0.4',
+    'vllm:cache_config_info{block_size="64",kv_cache_dtype_skip_layers="[]",kv_cache_memory_bytes="15032385536",kv_cache_size_tokens="883552",num_cpu_blocks="None",num_gpu_blocks="553"} 1.0',
+  ].join("\n");
+  probe._applyVllmMetrics(body, 2);
+  assert.equal(probe.kvCacheUsage, 0.4);
+  assert.equal(probe.kvCacheTokens, 883552);
+  assert.equal(probe.kvCacheMemoryBytes, 15032385536);
+  assert.equal(probe.kvCacheTokensAvailable, Math.round(883552 * 0.6));
+});
+
+test("vLLM cache_config_info: sums pools across engines and clamps usage", () => {
+  const probe = new LlmProbe({ lanIp: "10.0.0.1" }, 8000);
+  probe._applyVllmMetrics(
+    [
+      'vllm:kv_cache_usage_perc{engine="0"} 1.4',
+      'vllm:cache_config_info{engine="0",kv_cache_size_tokens="1000",kv_cache_memory_bytes="100"} 1',
+      'vllm:cache_config_info{engine="1",kv_cache_size_tokens="2000",kv_cache_memory_bytes="50"} 1',
+    ].join("\n"),
+    2
+  );
+  assert.equal(probe.kvCacheTokens, 3000);
+  assert.equal(probe.kvCacheMemoryBytes, 150);
+  assert.equal(probe.kvCacheTokensAvailable, 0);
 });

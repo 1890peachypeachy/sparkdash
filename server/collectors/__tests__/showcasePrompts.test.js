@@ -91,14 +91,18 @@ test("catalog prompts exist for text, structural, and mixed pickers", () => {
   assert.ok(textCount >= 2);
 });
 
-test("DecodeBench uses the lab decode-bench protocol at temperature 0, thinking off", () => {
-  assert.match(benchSrc, /pickDecodeBenchPrompts/);
-  assert.match(benchSrc, /decodeBenchPromptForType/);
-  assert.match(benchSrc, /count 1\u2192200|structured protocol|matches glm-5.3-flash-sm120/);
-  assert.match(benchSrc, /DECODE_BENCH_DEFAULT_TYPE/);
+test("DecodeBench uses the lab structured protocol at temperature 0, thinking off", () => {
+  // 1.8.3 moved DecodeBench off the Showcase structural catalog + fill-to-max
+  // and onto the lab structured protocol (count 1 -> 200); 1.8.4 added the
+  // output-type picker. These assertions still referenced the removed API.
+  assert.match(benchSrc, /pickDecodeBenchPrompts\(/);
+  assert.match(benchSrc, /decodeBenchPromptForType\(/);
+  assert.match(benchSrc, /normalizeDecodeBenchType\(/);
   assert.match(benchSrc, /temperature:\s*0/);
+  assert.match(benchSrc, /top_p:\s*1/);
   assert.match(benchSrc, /applyThinkingFlags\(body,\s*modelId,\s*false\)/);
   assert.match(benchSrc, /min_tokens:\s*maxTokens/);
+  assert.doesNotMatch(benchSrc, /withFillToMaxInstruction/);
   assert.doesNotMatch(benchSrc, /uniquePrefillPrefix/);
   assert.doesNotMatch(benchSrc, /BENCH_PROMPTS/);
 });
