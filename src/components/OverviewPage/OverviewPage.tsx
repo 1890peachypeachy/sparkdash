@@ -8,6 +8,7 @@ import { FleetAlertStrip } from "./FleetAlertStrip";
 import { FleetTokenTotals } from "./FleetTokenTotals";
 import { FleetKpis } from "./FleetKpis";
 import { ACTIVITY_ID, ENERGY_ID, TOKENS_ID } from "../../constants";
+import { LaneControlPanel } from "./LaneControlPanel";
 import { SparkCard } from "./SparkCard";
 import { ActivityFeed } from "./ActivityFeed";
 import { ActivityIcon, PowerOnIcon, RotateIcon } from "../ui/icons";
@@ -326,6 +327,9 @@ export function OverviewPage({
         <div className="ov-side">
           {showFleetEnergy ? <FleetEnergyCard nodeCount={sparks.length} onOpenDetails={onNavigate ? () => onNavigate(ENERGY_ID) : undefined} /> : null}
           {showLlmTokenTotals ? <FleetTokenTotals onOpenDetails={onNavigate ? () => onNavigate(TOKENS_ID) : undefined} /> : null}
+          <section className="panel ov-card" aria-label="Lane control">
+            <LaneControlPanel />
+          </section>
           <section className="panel ov-card" aria-label="Recent activity">
             <ActivityFeed limit={6} onSelectSpark={onSelectSpark} onViewAll={onNavigate ? () => onNavigate(ACTIVITY_ID) : undefined} />
           </section>

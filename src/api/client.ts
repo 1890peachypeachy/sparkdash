@@ -655,7 +655,8 @@ export function cancelLaneJob(jobId: string): Promise<{ jobId: string; status: s
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({}),
   });
-=======
+}
+
 // ─── LLM launchers (register a directory, run its start.sh / stop.sh) ───
 const launchersBase = (sparkId: string) => `/api/sparks/${encodeURIComponent(sparkId)}/llm-launchers`;
 
