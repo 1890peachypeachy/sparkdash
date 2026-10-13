@@ -52,6 +52,32 @@ describe("SparkCard", () => {
     expect(container.textContent).toContain("big-model");
   });
 
+function macSpark(): SparkSnapshot {
+  const m = makeSpark("mac", true);
+  return {
+    ...m,
+    kind: "mac",
+    metrics: {
+      ...m.metrics,
+      // macs report a zeroed gpu shell (no nvidia-smi) but real cpu/ram
+      gpu: { usage: 0, temperature: 0, vram: { used: 0, total: 0, available: 0, percentage: 0 }, power: { draw: 0, limit: 120 } },
+      cpu: { usage: 27, temperature: 0 },
+      ram: { used: 11305, total: 16384, available: 5079, percentage: 69 },
+    },
+  } as unknown as SparkSnapshot;
+}
+
+  it("a mac card shows CPU and RAM and hides the zeroed GPU temp/power rows", () => {
+    const { container } = render(<SparkCard spark={macSpark()} temperatureUnit="celsius" />);
+    const text = container.textContent ?? "";
+    expect(text).toContain("CPU");
+    expect(text).toContain("27%");
+    expect(text).toContain("RAM");
+    expect(text).toContain("11 / 16 GB");
+    expect(text).not.toContain("GPU temp");
+    expect(text).not.toContain("GPU power");
+  });
+
   it("a worker does not show an offline head's stale model", () => {
     const { container } = render(<SparkCard spark={worker()} headSpark={head(false)} temperatureUnit="celsius" />);
     expect(container.textContent).not.toContain("big-model");

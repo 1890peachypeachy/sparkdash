@@ -81,6 +81,9 @@ function SparkCardImpl({
 }) {
   const gpu = spark.metrics.gpu;
   const um = spark.metrics.unifiedMemory;
+  const cpu = spark.metrics.cpu;
+  // Macs have no nvidia-smi: gpu is a zeroed shell. CPU/RAM carry the real signal there.
+  const isMac = spark.kind === "mac";
   const online = spark.online;
   const role = resolveSparkRole(spark);
   const llmList = Array.isArray(spark.metrics.llm) ? spark.metrics.llm : [];
@@ -270,7 +273,15 @@ function SparkCardImpl({
                 />
               )}
               <Bar label="GPU" caption={`${Math.round(usage)}%`} pct={usage} color={ringColor} />
-              {spark.kind === "host" && spark.metrics.ram?.total ? (
+              {isMac && cpu ? (
+                <Bar
+                  label="CPU"
+                  caption={`${Math.round(cpu.usage)}%`}
+                  pct={Math.min(100, Math.max(0, cpu.usage))}
+                  color="var(--color-accent)"
+                />
+              ) : null}
+              {(spark.kind === "host" || isMac) && spark.metrics.ram?.total ? (
                 <Bar
                   label="RAM"
                   caption={`${fmtStorage(spark.metrics.ram.used, false)} / ${fmtStorage(spark.metrics.ram.total, true)}`}
@@ -278,13 +289,17 @@ function SparkCardImpl({
                   color="var(--color-info)"
                 />
               ) : null}
-              <Bar label="GPU temp" caption={fmtTemp(tempRaw)} pct={(tempVal / tempMax) * 100} color={tempColor} />
-              <Bar
-                label="GPU power"
-                caption={`${power?.draw ?? 0} / ${power?.limit ?? 0} W`}
-                pct={powerPct}
-                color="var(--color-violet)"
-              />
+              {!isMac && (
+                <>
+                  <Bar label="GPU temp" caption={fmtTemp(tempRaw)} pct={(tempVal / tempMax) * 100} color={tempColor} />
+                  <Bar
+                    label="GPU power"
+                    caption={`${power?.draw ?? 0} / ${power?.limit ?? 0} W`}
+                    pct={powerPct}
+                    color="var(--color-violet)"
+                  />
+                </>
+              )}
             </div>
           </div>
           {showLauncher ? <ModelLauncher spark={spark} onOpen={onSelect} busy={loadingHint} /> : null}
