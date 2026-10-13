@@ -33,13 +33,17 @@ function wasCollectionSuccessful(monitor, domain) {
 export function hasFreshPowerTelemetry(snapshot, monitor, atMs) {
   const gpu = snapshot?.metrics?.gpu;
   const cpu = snapshot?.metrics?.cpu;
+  // Macs have no nvidia-smi: their gpu is a zeroed shell even when healthy
+  // (collector success already proves the poll worked), so skip the
+  // default-shell heuristic that would exclude every mac forever.
+  const isMacUnit = monitor?.spark?.kind === "mac" || monitor?.spark?.platform === "darwin";
   return (
     snapshot?.online === true &&
     wasCollectionSuccessful(monitor, "gpu") &&
     wasCollectionSuccessful(monitor, "cpu") &&
     hasFreshTimestamp(monitor?._lastUpdate?.gpu, atMs) &&
     hasFreshTimestamp(monitor?._lastUpdate?.cpu, atMs) &&
-    !isDefaultGpuResult(gpu) &&
+    (isMacUnit || !isDefaultGpuResult(gpu)) &&
     !isDefaultCpuResult(cpu) &&
     Number.isFinite(gpu?.power?.draw) &&
     Number.isFinite(cpu?.usage)

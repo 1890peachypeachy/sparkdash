@@ -97,8 +97,19 @@ export class SystemCollector {
   /** Collect GPU metrics (temperature, usage, power, VRAM). */
   async collectGpu() {
     if (!this.spark.isLocal) {
-      if (this.isMac) return this._getRemoteMacGpu();
-      return this._getRemoteGpu();
+      // Remote results must carry the success tag too, or the fleet-energy
+      // sampler reads every remote unit as a failed collection (0 fresh, forever).
+      if (this.isMac) {
+        const macGpu = await this._getRemoteMacGpu();
+        // macOS has no userland GPU telemetry: the zeroed shell IS success here —
+        // judge by a sane power envelope, not temperature/usage (>0 checks below).
+        return tagCollectionResult(
+          macGpu,
+          Number.isFinite(macGpu?.power?.draw) && macGpu.power.draw >= 0
+        );
+      }
+      const remoteGpu = await this._getRemoteGpu();
+      return tagCollectionResult(remoteGpu, this._isSuccessfulGpuCollection(remoteGpu));
     }
     try {
       const gpuData = this.spark.isLocal
@@ -114,8 +125,12 @@ export class SystemCollector {
   /** Collect CPU metrics (usage, temperature, power). */
   async collectCpu() {
     if (!this.spark.isLocal) {
-      if (this.isMac) return this._getRemoteMacCpu();
-      return this._getRemoteCpu();
+      if (this.isMac) {
+        const macCpu = await this._getRemoteMacCpu();
+        return tagCollectionResult(macCpu, this._isSuccessfulCpuCollection(macCpu));
+      }
+      const remoteCpu = await this._getRemoteCpu();
+      return tagCollectionResult(remoteCpu, this._isSuccessfulCpuCollection(remoteCpu));
     }
     const collectionSequence = ++this._cpuCollectionSequence;
     try {
