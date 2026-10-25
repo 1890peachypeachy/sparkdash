@@ -38,6 +38,27 @@ const isProduction = (lane: LaneInfo) => lane.endpoint.includes(":8000");
 const JOB_POLL_MS = 1500;
 const LOG_TAIL = 14;
 
+/**
+ * Lanes are grouped by model family, not listed flat. The flat list grew past a screen
+ * and every row repeats the same endpoint/model, so the panel became a wall of text in
+ * which the only rows that matter — the ones actually holding nodes — were impossible to
+ * find. Serving lanes are therefore always shown in full; everything else collapses into
+ * per-family groups.
+ */
+const FAMILY_ORDER = ["dsv41", "glm53", "comfy", "other"] as const;
+const FAMILY_LABEL: Record<string, string> = {
+  dsv41: "DeepSeek V4.1",
+  glm53: "GLM-5.3",
+  comfy: "ComfyUI / Studios",
+  other: "Other",
+};
+function familyOf(id: string): string {
+  if (id.startsWith("dsv41")) return "dsv41";
+  if (id.startsWith("glm53")) return "glm53";
+  if (id.startsWith("comfy")) return "comfy";
+  return "other";
+}
+
 interface Dialog {
   kind: "down" | "swap";
   down: string[];
@@ -78,6 +99,28 @@ export function LaneControlPanel() {
   }, [load]);
 
   const byId = useMemo(() => new Map((lanes ?? []).map((l) => [l.id, l])), [lanes]);
+  // Only lanes that hold nodes are shown by default: they are what you act on, and what a
+  // swap has to take down. Everything else is parked inventory and collapses.
+  const serving = useMemo(
+    () => (lanes ?? []).filter((l) => l.status !== "down"),
+    [lanes],
+  );
+  const available = useMemo(
+    () => (lanes ?? []).filter((l) => l.status === "down"),
+    [lanes],
+  );
+  const [showAvailable, setShowAvailable] = useState(false);
+  // If nothing is serving, a panel with only a collapsed count is useless — open it.
+  const nothingServing = lanes !== null && serving.length === 0;
+  const availableOpen = showAvailable || nothingServing;
+  const byFamily = useMemo(() => {
+    const groups: { family: string; lanes: LaneInfo[] }[] = [];
+    for (const family of FAMILY_ORDER) {
+      const members = available.filter((l) => familyOf(l.id) === family);
+      if (members.length) groups.push({ family, lanes: members });
+    }
+    return groups;
+  }, [available]);
   const upSel = useMemo(
     () => [...selected].filter((id) => byId.get(id)?.status !== "up"),
     [selected, byId],
@@ -195,9 +238,12 @@ export function LaneControlPanel() {
       )}
       {!lanes && !error && <p className="text-xs text-muted">Reading lanes…</p>}
 
-      {lanes && (
+      {lanes && serving.length > 0 && (
         <div className="flex flex-col">
-          {lanes.map((lane) => (
+          <div className="pb-1 text-[10px] font-semibold uppercase tracking-wide text-muted">
+            Serving now ({serving.length})
+          </div>
+          {serving.map((lane) => (
             <LaneRow
               key={lane.id}
               lane={lane}
@@ -207,6 +253,47 @@ export function LaneControlPanel() {
               onVerify={() => void run(() => laneVerify(lane.id))}
             />
           ))}
+        </div>
+      )}
+
+      {lanes && available.length > 0 && (
+        <div className="mt-3 border-t border-border pt-2">
+          <button
+            type="button"
+            onClick={() => setShowAvailable((v) => !v)}
+            aria-expanded={availableOpen}
+            className="flex w-full items-center gap-1.5 text-left text-[10px] font-semibold uppercase tracking-wide text-muted transition-colors hover:text-text"
+          >
+            <span className={`inline-block transition-transform ${availableOpen ? "rotate-90" : ""}`}>
+              ▸
+            </span>
+            Available to bring up ({available.length})
+            {!availableOpen && (
+              <span className="ml-auto font-normal normal-case tracking-normal text-muted">
+                parked — tick one to start it
+              </span>
+            )}
+          </button>
+          {availableOpen &&
+            byFamily.map((group) => (
+              <div key={group.family} className="mt-2">
+                <div className="px-1 pb-0.5 text-[10px] font-medium uppercase tracking-wide text-muted">
+                  {FAMILY_LABEL[group.family] ?? group.family} ({group.lanes.length})
+                </div>
+                <div className="flex flex-col">
+                  {group.lanes.map((lane) => (
+                    <LaneRow
+                      key={lane.id}
+                      lane={lane}
+                      checked={selected.has(lane.id)}
+                      onToggle={(c) => onToggle(lane.id, c)}
+                      disabled={busy}
+                      onVerify={() => void run(() => laneVerify(lane.id))}
+                    />
+                  ))}
+                </div>
+              </div>
+            ))}
         </div>
       )}
 
@@ -317,6 +404,10 @@ function LaneRow({
   const holders = Object.entries(lane.holders ?? {});
   const blockers = Array.from(new Set(holders.map(([, l]) => l)));
   const prod = isProduction(lane);
+  // Co-tenants are the lanes sharing a node WITH this one. They are not blockers, but a
+  // swap has to know they are there — that is the difference between "taking this down
+  // frees 4 nodes" and "frees none of them".
+  const coTenants = Array.from(new Set(Object.values(lane.co_tenants ?? {}))).sort();
 
   return (
     <div className="flex flex-col gap-1 border-t border-border px-1 py-2 first:border-t-0">
@@ -349,14 +440,23 @@ function LaneRow({
         </button>
       </div>
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-6 text-[11px] text-muted">
-        <span className="font-tabular">{lane.endpoint}</span>
-        <span className="truncate" title={lane.model}>
+        <span className="truncate font-tabular" title={lane.endpoint}>
           {lane.model}
         </span>
+        {lane.nodes.length > 1 && (
+          <span className="truncate font-tabular text-muted" title={lane.endpoint}>
+            {lane.endpoint}
+          </span>
+        )}
       </div>
       {lane.status !== "up" && blockers.length > 0 && (
         <div className="pl-6 text-[11px] text-warning">
           blocked by {blockers.join(", ")} — {holders.map(([n, l]) => `${n}:${l}`).join(" ")}
+        </div>
+      )}
+      {coTenants.length > 0 && (
+        <div className="pl-6 text-[11px] text-muted">
+          sharing nodes with {coTenants.join(", ")}
         </div>
       )}
     </div>

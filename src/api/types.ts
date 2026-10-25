@@ -1150,6 +1150,11 @@ export interface LaneInfo {
   status: LaneState;
   /** node -> lane id that currently holds it (omitted when free or held by this lane) */
   holders: Record<string, string>;
+  /**
+   * node -> lane id(s) sharing that node WITH this lane. Only the designed co-tenant
+   * pairings appear here (ComfyUI next to a TF4 lane), never a blocker.
+   */
+  co_tenants?: Record<string, string>;
 }
 
 export interface LaneStatusResponse {
