@@ -439,6 +439,9 @@ function LaneRow({
           verify
         </button>
       </div>
+      {lane.label && (
+        <div className="pl-6 text-[11px] text-text/80">{lane.label}</div>
+      )}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5 pl-6 text-[11px] text-muted">
         <span className="truncate font-tabular" title={lane.endpoint}>
           {lane.model}

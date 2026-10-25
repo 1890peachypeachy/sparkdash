@@ -1144,6 +1144,13 @@ export type LaneState = "up" | "down" | "partial";
 
 export interface LaneInfo {
   id: string;
+  /**
+   * Human-readable description of what the lane IS: model, engine, and weights variant.
+   * Several lanes deliberately serve the SAME model name on the same endpoint, so the id
+   * alone cannot tell you what is behind it (e.g. SGLang vs TensorFold for DeepSeek V4.1).
+   * Display only — never use as a key.
+   */
+  label?: string;
   nodes: string[];
   endpoint: string;
   model: string;
