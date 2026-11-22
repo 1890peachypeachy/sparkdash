@@ -97,7 +97,6 @@ function placeholderSnapshot(
     kind?: "spark" | "host" | "mac";
     tailscaleMonitoring?: boolean;
     atticMonitoring?: boolean;
-    kind?: "spark" | "host" | "mac";
   }
 ): SparkSnapshot {
   const role =

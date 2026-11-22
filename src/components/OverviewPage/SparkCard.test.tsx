@@ -170,23 +170,33 @@ function macSpark(): SparkSnapshot {
     kind: "mac",
     metrics: {
       ...m.metrics,
-      // macs report a zeroed gpu shell (no nvidia-smi) but real cpu/ram
+      // macs report a zeroed gpu shell (no nvidia-smi) but real cpu/ram; since 2.91 the card reads the
+      // unified-memory block (physical memory + pressure + swap) instead of drawing its own CPU/RAM bars
       gpu: { usage: 0, temperature: 0, vram: { used: 0, total: 0, available: 0, percentage: 0 }, power: { draw: 0, limit: 120 } },
       cpu: { usage: 27, temperature: 0 },
       ram: { used: 11305, total: 16384, available: 5079, percentage: 69 },
+      unifiedMemory: {
+        total: 16384,
+        used: 11305,
+        available: 5079,
+        percentage: 69,
+        memoryPressure: "normal",
+        swap: { total: 4096, used: 1024, free: 3072 },
+      },
     },
   } as unknown as SparkSnapshot;
 }
 
-  it("a mac card shows CPU and RAM and hides the zeroed GPU temp/power rows", () => {
+  it("a mac card shows physical memory with pressure and never invents a zeroed GPU reading", () => {
+    // 2.91 redesign: a Mac's card leads with physical memory + pressure + swap and declares the GPU rows
+    // unavailable, rather than the old CPU/RAM bars we patched in on 2.0.0 (6c9abaf).
     const { container } = render(<SparkCard spark={macSpark()} temperatureUnit="celsius" />);
     const text = container.textContent ?? "";
-    expect(text).toContain("CPU");
-    expect(text).toContain("27%");
-    expect(text).toContain("RAM");
-    expect(text).toContain("11 / 16 GB");
-    expect(text).not.toContain("GPU temp");
-    expect(text).not.toContain("GPU power");
+    expect(text).toContain("Physical memory");
+    expect(text).toContain("Memory pressure");
+    expect(text).toContain("Swap on disk");
+    expect(text).toContain("unavailable");
+    expect(text).not.toContain("0 / 120 W");
   });
 
   it("a worker does not show an offline head's stale model", () => {

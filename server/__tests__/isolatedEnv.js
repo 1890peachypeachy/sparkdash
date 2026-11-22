@@ -8,6 +8,10 @@ import path from "node:path";
  * `isolatedEnv.test.js` fails when server code starts using a path variable missing here.
  */
 export const CONFIG_PATH_VARS = [
+  // Lane Control (our fork): the harness path and the audit ledger, so a test never shells out to the
+  // real spark-lane or writes rows into the live logs/lane-control.jsonl.
+  "SPARK_LANE_PATH",
+  "LANE_AUDIT_PATH",
   "SPARKS_JSON_PATH",
   "SPARKS_SECRETS_PATH",
   "SECRETS_KEY_PATH",
