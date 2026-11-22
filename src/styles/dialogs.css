@@ -238,6 +238,17 @@
   -webkit-overflow-scrolling: touch;
   padding: 1.3rem 1.35rem;
 }
+/* A dialog that wraps its body+footer in a <form> (the Add-a-model dialog) hides
+ * them from the sheet's flex column: the form became an auto-height block, so a
+ * tall body — the Discover list — pushed the Cancel/Add footer past the clipped
+ * bottom of the sheet, out of reach. The form must carry the column through:
+ * body scrolls, footer stays pinned. */
+.modal-sheet > form {
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+  flex-direction: column;
+}
 .modal-sheet__stack {
   display: flex;
   flex-direction: column;
@@ -255,6 +266,14 @@
   border: 1px solid color-mix(in srgb, var(--color-danger) 35%, transparent);
   background: color-mix(in srgb, var(--color-danger) 12%, transparent);
   color: var(--color-danger);
+  font-size: 0.75rem;
+}
+.modal-sheet__success {
+  padding: 0.6rem 0.8rem;
+  border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--color-success) 35%, transparent);
+  background: color-mix(in srgb, var(--color-success) 12%, transparent);
+  color: var(--color-success);
   font-size: 0.75rem;
 }
 .settings-panel > .modal-sheet__error {
@@ -561,6 +580,10 @@
   font-size: 0.7rem;
   line-height: 1.4;
   color: var(--color-muted);
+}
+.set-row__text small > .set-row__action {
+  display: block;
+  margin-top: 0.4rem;
 }
 .set-row__control {
   display: flex;
@@ -1378,6 +1401,28 @@
   text-align: right;
 }
 
+/* Settings: flat or time-of-use electricity price, one row per period. */
+.set-tariff {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+}
+.set-tariff__unit {
+  color: var(--color-muted);
+  font-size: 0.85em;
+}
+.set-tariff__period {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+.set-tariff__period .field-input--price {
+  width: 6rem;
+  text-align: right;
+}
+
 /* "Show card" window: the share image in a proper panel on a blurred scrim. */
 .card-preview {
   position: fixed;
@@ -1653,12 +1698,12 @@
   color: var(--color-muted);
 }
 
-/* Quality: category picker header with bulk actions */
+/* Quality: category picker header with bulk actions beside the title */
 .qsel-head {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  gap: 8px 12px;
 }
 .qsel-bulk {
   display: inline-flex;
@@ -1782,4 +1827,677 @@
 }
 .set-token__state.is-set i {
   background: var(--color-success);
+}
+
+/* Fleet-wide GPU clock cap (Settings). */
+.set-fleetcap {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.set-fleetcap__presets {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.set-fleetcap__presets .is-current {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+  color: var(--color-accent-text);
+  font-weight: 600;
+}
+/* Picked but not applied: Save is what changes a unit. */
+.set-fleetcap__presets .is-picked {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+.set-fleetcap__hint {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.set-fleetcap__msg {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-muted-strong);
+}
+.set-fleetcap__msg.is-err {
+  color: var(--color-danger, var(--color-muted-strong));
+}
+.set-fleetcap__detail {
+  display: block;
+  margin-top: 2px;
+  overflow-wrap: anywhere;
+  color: var(--color-muted);
+}
+
+/* A row whose control sits under the text instead of beside it. */
+.set-row--stack {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.5rem;
+}
+.set-row--stack .set-row__control {
+  flex-direction: column;
+  align-items: flex-start;
+  flex-shrink: 1;
+  gap: 4px;
+}
+
+/* Settings → Time zone: input with suggestions, plus "Use browser". The message line is
+   always reserved, so showing it never moves the field. */
+.set-tz {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: 100%;
+}
+.set-tz .field-input {
+  width: min(16rem, 100%);
+  min-width: 0;
+}
+.set-tz .field-input[aria-invalid="true"] {
+  border-color: var(--color-danger);
+}
+.set-tz__msg {
+  display: block;
+  min-height: 1.4em;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-danger);
+}
+
+/* GPU clock cap block in Edit unit */
+.gpu-clock {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--color-border);
+}
+.gpu-clock__now {
+  margin: 0;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.gpu-clock__now b {
+  color: var(--color-text);
+}
+.gpu-clock__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.gpu-clock__row input[type="number"] {
+  width: 120px;
+}
+.gpu-clock__unit {
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.gpu-clock__check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+.gpu-clock__manual summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--color-muted);
+}
+.gpu-clock__command {
+  width: 100%;
+  font-family: var(--font-mono, "Geist Mono", ui-monospace, monospace);
+  font-size: 11px;
+  line-height: 1.4;
+  resize: vertical;
+}
+
+/* GPU power limit block in Edit unit: one of these per card, inside .gpu-clock */
+.gpu-power__card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+/* Settings → Tab badge / Desktop notifications: why a switch is unavailable. */
+.set-row__note {
+  display: block;
+  margin-top: 0.25rem;
+  color: var(--color-warning);
+}
+
+/* Settings → Alert notifications dialog */
+.alerts-fieldset {
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+.alerts-fieldset:disabled {
+  opacity: 0.55;
+}
+.alerts-off-note {
+  margin: 0.25rem 0 0.5rem;
+}
+.alerts-section {
+  margin-top: 1.1rem;
+}
+.alerts-section__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+}
+.alerts-section__title {
+  margin: 0;
+  font-size: 0.7rem;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--color-muted-strong);
+}
+.alerts-section__help {
+  margin: 0.3rem 0 0.4rem;
+  font-size: 0.7rem;
+  line-height: 1.45;
+  color: var(--color-muted);
+}
+.alerts-wait {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-right: 0.75rem;
+  font-size: 0.7rem;
+  color: var(--color-muted);
+}
+.modal-sheet .alerts-wait input[type="number"] {
+  width: 4.75rem;
+  min-height: 2rem;
+  padding: 0.3rem 0.5rem;
+  text-align: right;
+}
+.alerts-channel {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+  padding: 0.75rem;
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+}
+.alerts-channel__row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.modal-sheet .alerts-channel__row > select {
+  width: auto;
+  flex: 0 0 auto;
+}
+.modal-sheet .alerts-channel__row > .alerts-channel__name {
+  flex: 1 1 8rem;
+  width: auto;
+  min-width: 0;
+}
+.alerts-channel__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+.alerts-list {
+  margin: 0.35rem 0 0;
+  padding: 0;
+  list-style: none;
+  max-height: 14rem;
+  overflow-y: auto;
+}
+.alerts-list > li {
+  padding: 0.4rem 0 0.4rem 0.6rem;
+  border-left: 2px solid var(--color-border-strong);
+  font-size: 0.75rem;
+  line-height: 1.4;
+  color: var(--color-text);
+}
+.alerts-list > li + li {
+  margin-top: 0.25rem;
+}
+.alerts-list > li small {
+  display: block;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.alerts-list > li.is-critical {
+  border-left-color: var(--color-danger);
+}
+.alerts-list > li.is-warning {
+  border-left-color: var(--color-warning);
+}
+.alerts-list > li.is-ok {
+  border-left-color: var(--color-success);
+}
+.alerts-error {
+  margin: 0 1.35rem 0.75rem;
+}
+
+/* ─── Model discovery: "Discover on this Spark" candidate list ─── */
+.model-discovery {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+}
+.model-discovery__scan {
+  margin: 0;
+  font-size: 0.75rem;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.model-discovery__list {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+  max-height: 13rem;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 10px;
+  background: var(--color-surface);
+}
+.model-discovery__group {
+  font-size: 0.7rem;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--color-muted);
+  margin: 0.25rem 0 0;
+}
+.model-discovery__row {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  text-align: left;
+  cursor: pointer;
+}
+.model-discovery__row:hover {
+  background: var(--color-surface-hover);
+  border-color: var(--color-border-strong);
+}
+.model-discovery__badge {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  padding: 0.05rem 0.4rem;
+  border-radius: 6px;
+  border: 1px solid var(--color-border-strong);
+  background: var(--color-surface);
+  font-size: 0.65rem;
+  font-weight: 700;
+  color: var(--color-muted-strong);
+}
+.model-discovery__name {
+  min-width: 0;
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.model-discovery__meta {
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 0.7rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-muted);
+}
+.model-discovery__dir {
+  display: block;
+  font-family: var(--font-mono, "Geist Mono", ui-monospace, monospace);
+  font-size: 0.7rem;
+  color: var(--color-muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100%;
+}
+
+/* Bench model picker for multi-model routers (fork). */
+.bench-select {
+  display: block;
+  box-sizing: border-box;
+  width: 100%;
+  max-width: 24rem;
+  min-height: 2.25rem;
+  padding: 0.4rem 0.65rem;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-border);
+  background: #ffffff;
+  color: var(--color-text);
+  font-size: 0.8125rem;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+}
+[data-theme="dark"] .bench-select,
+[data-theme="oled"] .bench-select {
+  background: var(--color-surface-elevated);
+}
+.bench-select:focus {
+  border-color: var(--color-accent);
+}
+.bench-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.bench-status-pill--cancelled {
+  background: var(--color-surface-elevated);
+  color: var(--color-muted);
+}
+
+/* Quality bench — scoring v3 flags: budget-limited score, stored full reply */
+.q-flag {
+  margin-left: 0.15em;
+  color: var(--color-warning);
+  font-weight: 700;
+  cursor: help;
+}
+/* A budget-limited row is a note, not a fault: plain text with a small tag; only the * carries the warning colour. */
+.q-cat-table tr.is-budget-limited .q-cat-table__note {
+  color: var(--color-muted);
+}
+.q-note-tag {
+  display: inline-block;
+  margin-right: 6px;
+  border-radius: 999px;
+  padding: 0 7px;
+  border: 1px solid var(--color-border);
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+}
+.q-reply {
+  margin-top: 0.25rem;
+}
+.q-reply__text {
+  margin: 0.25rem 0 0;
+  max-height: 14rem;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font-size: 10px;
+  line-height: 1.4;
+  padding: 0.4rem 0.5rem;
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-surface-elevated);
+  color: var(--color-text);
+}
+
+/* Quality bench WP0: the engine record line and the noise floor. */
+.qrun__check {
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+.qrun__field.qrun__check input {
+  width: auto;
+  accent-color: var(--color-accent);
+}
+.q-engine {
+  font-size: 11px;
+  color: var(--color-muted);
+}
+.q-engine__line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  cursor: pointer;
+  list-style: none;
+}
+.q-engine__line::-webkit-details-marker {
+  display: none;
+}
+.q-engine__label {
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  font-size: 10px;
+}
+.q-engine__cap {
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid var(--color-border);
+}
+.q-engine__cap.is-yes {
+  color: var(--color-success);
+  border-color: color-mix(in srgb, var(--color-success) 50%, transparent);
+}
+.q-engine__cap.is-no {
+  color: var(--color-warning);
+  border-color: color-mix(in srgb, var(--color-warning) 50%, transparent);
+}
+.q-engine__grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  gap: 2px 16px;
+  margin: 8px 0 0;
+  padding: 8px;
+  border-radius: 4px;
+  background: var(--color-surface-elevated);
+}
+.q-engine__grid div {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+.q-engine__grid dt {
+  flex: 0 0 140px;
+  color: var(--color-muted);
+}
+.q-engine__grid dd {
+  margin: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+  font-family: var(--font-mono, ui-monospace, monospace);
+}
+.q-noise {
+  margin-top: 8px;
+}
+.q-noise__head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  margin-bottom: 4px;
+  font-size: 12px;
+}
+.q-noise__head span {
+  color: var(--color-muted);
+}
+.q-reply__text--reasoning {
+  opacity: 0.85;
+}
+
+/* Quality bench WP1: intervals, coverage and run warnings. */
+.q-ci {
+  font-size: 10.5px;
+  color: var(--color-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.q-score__ci {
+  display: block;
+  margin-top: 2px;
+}
+.q-score__partial {
+  color: var(--color-warning);
+}
+.q-warnings {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin: 6px 0;
+}
+.q-warning {
+  margin: 0;
+  padding: 6px 10px;
+  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--color-warning) 50%, transparent);
+  background: color-mix(in srgb, var(--color-warning) 10%, transparent);
+  color: var(--color-text);
+  font-size: 11.5px;
+}
+
+/* Quality bench WP2: the fidelity card. */
+.q-fid {
+  margin-top: 10px;
+}
+.q-fid__stats {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 20px;
+  margin: 6px 0 8px;
+}
+.q-fid__stat {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 96px;
+}
+.q-fid__stat b {
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.2;
+}
+.q-fid__stat--cmp b {
+  font-size: 15px;
+}
+.q-fid__stat .is-up {
+  color: var(--color-success);
+}
+.q-fid__stat .is-down {
+  color: var(--color-danger);
+}
+.q-fid__unsupported {
+  color: var(--color-warning);
+}
+.q-fid__docs small {
+  font-size: 10px;
+}
+
+/* Quality bench WP3: the divergence card. */
+.q-div__drift {
+  margin: 0 0 6px;
+  font-size: 11.5px;
+  color: var(--color-muted);
+}
+.q-div__kinds td.q-cat-table__name {
+  text-transform: capitalize;
+}
+
+/* Quality bench WP4: comparison header, quant dashboard, reference badge. */
+.q-cmphead {
+  margin: 8px 0;
+}
+.q-cmphead__table td {
+  overflow-wrap: anywhere;
+}
+.q-cmphead__table tr.is-diff td {
+  color: var(--color-warning);
+}
+.q-quant {
+  margin: 8px 0;
+}
+.q-quant__table td.is-up {
+  color: var(--color-success);
+}
+.q-quant__table td.is-down {
+  color: var(--color-danger);
+}
+.q-ref-badge {
+  margin-left: 8px;
+  border-radius: 999px;
+  padding: 1px 8px;
+  border: 1px solid color-mix(in srgb, var(--color-accent) 50%, transparent);
+  color: var(--color-accent);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+/* Quality bench WP4: the plain-words verdict and the compare page. */
+.q-verdicts {
+  margin: 8px 0 12px;
+}
+.q-verdicts__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.q-verdict-row {
+  display: grid;
+  grid-template-columns: minmax(150px, 220px) minmax(110px, 160px) 1fr;
+  gap: 8px;
+  align-items: baseline;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background: var(--color-surface-elevated);
+  font-size: 12px;
+}
+.q-verdict-row__area {
+  font-weight: 600;
+}
+.q-verdict-row__tag {
+  font-weight: 600;
+  color: var(--color-muted);
+}
+.q-verdict-row--A .q-verdict-row__tag {
+  color: var(--color-success);
+}
+.q-verdict-row--B .q-verdict-row__tag {
+  color: var(--color-danger);
+}
+.q-verdict-row__ev {
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+.q-compare__pickers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin: 8px 0;
+}
+.q-pick--wide select {
+  max-width: 100%;
+  min-width: 18rem;
+}
+@media (max-width: 640px) {
+  .q-verdict-row {
+    grid-template-columns: 1fr;
+    gap: 2px;
+  }
+}
+
+/* A hint elsewhere that opens Settings at a section (ui/SettingsLink). */
+.settings-link {
+  color: var(--color-accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }

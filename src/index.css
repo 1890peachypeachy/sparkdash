@@ -367,6 +367,10 @@ input:disabled {
   width: var(--bar-pct, 0%);
 }
 
+.mac-memory-cache {
+  background: repeating-linear-gradient(135deg, var(--color-info) 0 2px, var(--color-surface-hover) 2px 4px);
+}
+
 /* VRAM breakdown bar segments (see src/shared/vramBreakdown.ts) */
 .mem-seg-engine {
   background-color: var(--color-mem-engine);
@@ -812,6 +816,10 @@ html {
 /* Only <main> animates (hooks/pageTransition.ts); the sidebar swaps its highlight with a short cross-fade. */
 .app-content > main {
   view-transition-name: page;
+}
+.page-vt .app-content > main {
+  height: var(--page-vt-height);
+  overflow-y: clip;
 }
 ::view-transition-group(root) {
   animation-duration: 0.18s;

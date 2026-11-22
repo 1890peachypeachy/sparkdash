@@ -1,0 +1,545 @@
+import { act } from "react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { flush, render } from "../../testing/render";
+import type { MetricsHistoryData, MetricsHistoryResponse } from "../../api/types";
+import { nearestIndex, segmentRuns, windowStats, yDomain } from "./HistoryChart";
+import { HISTORY_POLL_MS, HISTORY_RANGE_KEY, HistoryPanel } from "./HistoryPanel";
+import { i18n, setLocale } from "../../i18n";
+
+vi.mock("../../api/client", () => ({
+  getUnitHistory: vi.fn(),
+}));
+
+import { getUnitHistory } from "../../api/client";
+
+const fetchHistory = vi.mocked(getUnitHistory);
+
+describe("complete cache history", () => {
+  it("renders churn, spare/entries, latency, boundaries, duration coverage and weighted reuse without averaging p95", async () => {
+    const point = {
+      t: T0, n: 3, coveredMs: 30_000, promptTokens: 1000, cachedTokens: 900, reusePct: 90, completions: 10,
+      pool: { capacity: 100, active: 20, prefix: 30, growth: 10, unclaimed: 40 },
+      store: { held: 100, spare: 200, budget: 500, entries: 2 }, waiting: 1,
+      churn: { evictions: 3, invalidations: 1, failures: 0, refusals: 0, placementBlocks: 0 },
+      ttftP95: { value: 1, upperBound: 2, exact: false as const },
+      latencyP95: { value: null, lowerBound: 300, open: true, exact: false as const },
+      histogramSamples: { ttft: 10, latency: 10 },
+    };
+    const { container } = await mount(data({
+      points: [{ t: T0, memAvailableMB: { avg: 20_000, min: 18_000, max: 21_000 } }],
+      cache: { range: "1h", stepMs: STEP, from: T0, to: T0 + 6 * STEP,
+        endpoints: [{ port: 8888, engineEpoch: "2", firstAvailableAt: T0, points: [point, {
+          ...point, t: T0 + STEP, promptTokens: 10, cachedTokens: 0, reusePct: 0,
+          coveredMs: undefined, coveragePartial: true, waiting: 0,
+          churn: { evictions: 0, invalidations: 0, failures: 0, refusals: 0, placementBlocks: 0 },
+          latencyP95: { value: 2, upperBound: 3, exact: false },
+        }] }],
+        events: [{ t: T0 + 30_000, port: 8888, kind: "engine_restart" }, { t: T0 + 90_000, port: 8888, kind: "counter_reset" }],
+      },
+    }));
+    expect(chart(container, "cache-8888-churn").textContent).toContain("Invalidations");
+    expect(chart(container, "cache-8888-store").textContent).toContain("Spare");
+    expect(chart(container, "cache-8888-entries")).toBeTruthy();
+    expect(chart(container, "cache-8888-latency").textContent).toContain("Request latency p95");
+    expect(chart(container, "cache-8888-ttft").querySelector('[aria-label="window summary"]')!.textContent).not.toContain("avg");
+    expect(chart(container, "cache-8888-reuse").querySelector('[aria-label="window summary"]')!.textContent).not.toContain("avg");
+    expect(chart(container, "memAvailable").textContent).toContain("this rank only");
+    expect(container.querySelectorAll("[data-cache-event]").length).toBe(2);
+    expect(container.textContent).toContain("89.11%");
+    expect(container.textContent).toContain("legacy duration coverage not recorded");
+    expect(container.textContent).toContain("above 300 s (open upper bound)");
+    expect(container.textContent).toContain("6.00"); // 3 evictions / 30 covered seconds
+    expect(container.textContent).toContain("engine restart");
+    expect(container.textContent).toContain("counter reset");
+    expect(container.textContent).toContain("Demand / latency / headroom");
+  });
+});
+
+const STEP = 60_000;
+const T0 = Date.UTC(2026, 9, 1, 12, 0, 0);
+
+/** 6 one-minute buckets with the third and fourth missing (unit offline). */
+function data(overrides: Partial<MetricsHistoryData> = {}): MetricsHistoryData {
+  const at = (i: number) => T0 + i * STEP;
+  return {
+    enabled: true,
+    range: "6h",
+    stepMs: STEP,
+    from: at(0),
+    to: at(6),
+    points: [0, 1, 4, 5].map((i) => ({
+      t: at(i),
+      gpuUtil: { avg: 10 * (i + 1), max: 10 * (i + 2) },
+      gpuTemp: { avg: 50 + i, max: 55 + i },
+      memFreeMB: { avg: 9_000, max: 9_500, min: 7_000 },
+      netRx: { avg: 2048, max: 4096 },
+      netTx: { avg: 1024, max: 1024 },
+    })),
+    llm: [
+      {
+        port: 8888,
+        points: [0, 1].map((i) => ({ t: at(i), genTps: { avg: 40 + i, max: 45 }, kvUsage: { avg: 0.25, max: 0.5 } })),
+      },
+    ],
+    ...overrides,
+  };
+}
+
+function chart(container: HTMLElement, id: string): HTMLElement {
+  const el = container.querySelector<HTMLElement>(`[data-chart="${id}"]`);
+  if (!el) throw new Error(`no chart ${id}`);
+  return el;
+}
+
+/** Charts with something to draw (empty ones show "No data in this range"). */
+function chartsWithData(container: HTMLElement) {
+  return [...container.querySelectorAll("[data-chart]")].filter(
+    (c) => !c.textContent!.includes("No data in this range"),
+  );
+}
+
+/** Chart ids in DOM order — the small-multiple sequence the panel renders. */
+function chartOrder(container: HTMLElement): string[] {
+  return [...container.querySelectorAll<HTMLElement>("[data-chart]")].map((el) => el.dataset.chart!);
+}
+
+function plot(container: HTMLElement, id: string): HTMLElement {
+  return chart(container, id).querySelector<HTMLElement>('[role="group"]')!;
+}
+
+function key(el: HTMLElement, k: string) {
+  act(() => {
+    el.dispatchEvent(new KeyboardEvent("keydown", { key: k, bubbles: true }));
+  });
+}
+
+async function mount(response: MetricsHistoryResponse = data()) {
+  fetchHistory.mockResolvedValue(response);
+  const result = render(<HistoryPanel sparkId="spark-1" kind="spark" temperatureUnit="celsius" />);
+  await flush();
+  return result;
+}
+
+beforeEach(() => {
+  localStorage.clear();
+  fetchHistory.mockReset();
+});
+
+afterEach(() => {
+  vi.useRealTimers();
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+});
+
+describe("HistoryChart helpers", () => {
+  it("breaks lines at missing buckets and at jumps longer than a step", () => {
+    const v = { avg: 1, max: 1 };
+    expect(segmentRuns([0, 60, 120, 300, 360], [v, v, null, v, v], 60)).toEqual([[0, 1], [3, 4]]);
+    expect(segmentRuns([0, 60, 300, 360], [v, v, v, v], 60)).toEqual([[0, 1], [2, 3]]);
+  });
+
+  it("finds the nearest bucket", () => {
+    expect(nearestIndex([0, 10, 20], 14)).toBe(1);
+    expect(nearestIndex([0, 10, 20], 16)).toBe(2);
+    expect(nearestIndex([0, 10, 20], -5)).toBe(0);
+    expect(nearestIndex([], 5)).toBe(-1);
+  });
+
+  it("covers the band and thresholds in the y range, with room above the highest threshold", () => {
+    const d = yDomain(
+      [{ key: "m", label: "m", color: "x", band: "min", values: [{ avg: 7_700, max: 7_800, min: 7_600 }] }],
+      0,
+      undefined,
+      [
+        { value: 8192, label: "low", color: "x" },
+        { value: 4096, label: "critical", color: "x" },
+      ],
+      1024,
+    )!;
+    expect(d.lo).toBe(0);
+    expect(d.hi).toBeGreaterThanOrEqual(8192 * 1.25);
+    expect(yDomain([{ key: "a", label: "a", color: "x", values: [null] }])).toBeNull();
+  });
+
+  it("summarises a window: mean of averages, peak of maxes, true min where stored", () => {
+    expect(windowStats([{ avg: 10, max: 20 }, { avg: 30, max: 40 }, null])).toEqual({
+      avg: 20,
+      peak: 40,
+      low: 10,
+      lowFromAvg: true,
+    });
+    expect(windowStats([{ avg: 10, max: 20, min: 5 }, { avg: 30, max: 40, min: 7 }])).toEqual({
+      avg: 20,
+      peak: 40,
+      low: 5,
+      lowFromAvg: false,
+    });
+    expect(windowStats([null]).avg).toBeNull();
+  });
+});
+
+describe("HistoryPanel", () => {
+  it("keeps range, keyboard focus, chart gaps and reads across a locale round trip", async () => {
+    const initialLocale = i18n.language;
+    await setLocale("en");
+    try {
+      const { container } = await mount();
+      const chip = [...container.querySelectorAll<HTMLButtonElement>(".seg button")].find((b) => b.textContent === "24h")!;
+      act(() => chip.click());
+      await flush();
+      const gpu = plot(container, "gpuUtil");
+      act(() => gpu.focus());
+      key(gpu, "ArrowLeft");
+      const geometry = () => [...container.querySelectorAll("polyline, polygon")].map((node) => node.getAttribute("points"));
+      const before = geometry();
+      const calls = fetchHistory.mock.calls.length;
+      await act(async () => { await setLocale("zh-CN"); });
+      expect(container.textContent).toContain("历史记录 · 最近 24 小时");
+      expect(container.querySelector("[data-window-summary]")?.textContent).toContain("窗口");
+      expect(container.querySelector("[data-window-summary]")?.textContent).toContain("平均");
+      expect(gpu.getAttribute("aria-label")).toContain("使用方向键");
+      expect(document.activeElement).toBe(gpu);
+      expect(chip.getAttribute("aria-pressed")).toBe("true");
+      expect(geometry()).toEqual(before);
+      expect(fetchHistory).toHaveBeenCalledTimes(calls);
+      await act(async () => { await setLocale("en"); });
+      expect(container.textContent).toContain("History · last 24 hours");
+      expect(container.querySelector("[data-window-summary]")?.textContent).toContain("window");
+      expect(geometry()).toEqual(before);
+      expect(fetchHistory).toHaveBeenCalledTimes(calls);
+    } finally {
+      await act(async () => { await i18n.changeLanguage(initialLocale); });
+    }
+  });
+
+  it("defaults to 1h, and the range chips refetch and are remembered", async () => {
+    const { container } = await mount();
+    expect(fetchHistory).toHaveBeenLastCalledWith("spark-1", "1h");
+    const chip = [...container.querySelectorAll(".seg button")].find((b) => b.textContent === "24h") as HTMLButtonElement;
+    expect(chip.getAttribute("aria-pressed")).toBe("false");
+    act(() => chip.click());
+    await flush();
+    expect(fetchHistory).toHaveBeenLastCalledWith("spark-1", "24h");
+    expect(chip.getAttribute("aria-pressed")).toBe("true");
+    expect(chip.className).toContain("is-on");
+    expect(localStorage.getItem(HISTORY_RANGE_KEY)).toBe("24h");
+    expect(container.querySelector(".panel-title")!.textContent).toContain("History · last 24 hours");
+
+    fetchHistory.mockClear();
+    render(<HistoryPanel sparkId="spark-1" temperatureUnit="celsius" />);
+    await flush();
+    expect(fetchHistory).toHaveBeenLastCalledWith("spark-1", "24h");
+  });
+
+  it("draws an offline stretch as a gap, not a line across it", async () => {
+    const { container } = await mount();
+    const gpu = chart(container, "gpuUtil");
+    expect(gpu.querySelectorAll('polyline[data-series="gpuUtil"]')).toHaveLength(2);
+    expect(gpu.querySelectorAll('polygon[data-band="gpuUtil"]')).toHaveLength(2);
+    expect(gpu.querySelector('[data-axis="ymax"]')!.textContent).toBe("100%");
+    expect(gpu.querySelector('[data-axis="ymin"]')!.textContent).toBe("0.0%");
+    expect(gpu.querySelector('[data-axis="xstart"]')!.textContent).not.toBe("");
+    expect(gpu.querySelector('[data-axis="xend"]')!.textContent).not.toBe("");
+  });
+
+  it("shows the headroom thresholds on the free-memory chart", async () => {
+    const { container } = await mount();
+    const mem = chart(container, "memFree");
+    expect(mem.textContent).toContain("Memory free (unified)");
+    expect(mem.querySelectorAll("[data-threshold]")).toHaveLength(2);
+    expect(mem.textContent).toContain("low 8.0 GB");
+    expect(mem.textContent).toContain("critical 4.0 GB");
+  });
+
+  it("charts what consumed a unified pool in its own cell, and adds none on a discrete card", async () => {
+    const split = data();
+    split.points = split.points.map((p) => ({
+      ...p,
+      memGpuMB: { avg: 6_000, max: 6_500 },
+      memSysMB: { avg: 2_000, max: 2_100 },
+    }));
+    fetchHistory.mockResolvedValue(split);
+    const unified = render(<HistoryPanel sparkId="spark-1" kind="spark" temperatureUnit="celsius" />);
+    await flush();
+    // The free chart keeps its single series and its thresholds: a 6 GB GPU share must not
+    // flatten the free trace by sharing its y-axis.
+    const mem = chart(unified.container, "memFree");
+    const memKeys = [...mem.querySelectorAll("[data-series]")].map((el) => el.getAttribute("data-series"));
+    expect(new Set(memKeys)).toEqual(new Set(["memFreeMB"]));
+    expect(mem.querySelector('[data-series="memGpuMB"]')).toBeNull();
+    expect(mem.textContent).not.toContain("GPU");
+
+    // The split is a chart of its own, on a 0-based domain, next to the free chart.
+    const used = chart(unified.container, "memSplit");
+    expect(used.textContent).toContain("Memory used");
+    expect(used.querySelectorAll('polyline[data-series="memGpuMB"]').length).toBeGreaterThan(0);
+    expect(used.querySelectorAll('polyline[data-series="memSysMB"]').length).toBeGreaterThan(0);
+    expect(used.querySelector('[data-axis="ymin"]')!.textContent).toBe("0 MB");
+    const ids = [...unified.container.querySelectorAll("[data-chart]")].map((c) => c.getAttribute("data-chart"));
+    expect(ids.indexOf("memSplit")).toBe(ids.indexOf("memFree") + 1);
+
+    // A discrete card's used figure is the GPU's alone: there is nothing to split.
+    fetchHistory.mockResolvedValue(split);
+    const discrete = render(<HistoryPanel sparkId="h" kind="host" platform="linux" temperatureUnit="celsius" />);
+    await flush();
+    expect(discrete.container.querySelector('[data-chart="memSplit"]')).toBeNull();
+  });
+
+  it("uses the discrete thresholds on a GPU host", async () => {
+    fetchHistory.mockResolvedValue(data());
+    const { container } = render(<HistoryPanel sparkId="h" kind="host" temperatureUnit="celsius" />);
+    await flush();
+    const mem = chart(container, "memFree");
+    expect(mem.textContent).toContain("VRAM free");
+    expect(mem.textContent).toContain("low 2.0 GB");
+  });
+
+  it("adds a RAM chart on a discrete host, but not on a Mac, whose RAM is the unified pool", async () => {
+    const withRam = data();
+    withRam.points = withRam.points.map((p) => ({ ...p, ramUsedMB: { avg: 40_000, max: 41_000 } }));
+    fetchHistory.mockResolvedValue(withRam);
+    const linux = render(<HistoryPanel sparkId="h" kind="host" platform="linux" temperatureUnit="celsius" />);
+    await flush();
+    expect(chart(linux.container, "ramUsed").textContent).toContain("RAM used");
+
+    // A Mac's RAM is the unified pool charted above, so only a discrete host gets the RAM chart.
+    const mac = render(<HistoryPanel sparkId="m" kind="host" platform="darwin" temperatureUnit="celsius" />);
+    await flush();
+    expect(mac.container.querySelector('[data-chart="ramUsed"]')).toBeNull();
+    expect(chart(mac.container, "memFree").textContent).toContain("Memory free (unified)");
+  });
+
+  it("groups the small multiples by domain: hardware, LLM ports, then system/IO", async () => {
+    const withRam = data();
+    withRam.points = withRam.points.map((p) => ({ ...p, ramUsedMB: { avg: 40_000, max: 41_000 } }));
+
+    const unified = await mount(withRam);
+    expect(chartOrder(unified.container)).toEqual([
+      "gpuUtil", "gpuTemp", "gpuPower", "memFree", "cpuUtil", "cpuTemp",
+      "llm-8888-gen", "llm-8888-prefill", "llm-8888-kv", "network",
+    ]);
+
+    // A discrete host adds RAM used, which belongs with Network in the system/IO domain.
+    const linux = render(<HistoryPanel sparkId="h" kind="host" platform="linux" temperatureUnit="celsius" />);
+    await flush();
+    expect(chartOrder(linux.container)).toEqual([
+      "gpuUtil", "gpuTemp", "gpuPower", "memFree", "cpuUtil", "cpuTemp",
+      "llm-8888-gen", "llm-8888-prefill", "llm-8888-kv", "ramUsed", "network",
+    ]);
+  });
+
+  it("charts each LLM endpoint, KV only when reported", async () => {
+    const { container } = await mount();
+    expect(chart(container, "llm-8888-gen")).toBeTruthy();
+    expect(chart(container, "llm-8888-prefill").textContent).toContain("No data in this range");
+    expect(chart(container, "llm-8888-kv")).toBeTruthy();
+  });
+
+  it("moves one crosshair across every chart from the keyboard, with a tooltip", async () => {
+    const { container } = await mount();
+    const gpu = plot(container, "gpuUtil");
+    act(() => gpu.focus());
+    // Focus lands on the newest bucket; every chart with data draws the crosshair there.
+    expect(chartsWithData(container).length).toBe(6);
+    expect(container.querySelectorAll("[data-crosshair]")).toHaveLength(6);
+    const tooltips = () => container.querySelectorAll("[data-tooltip]");
+    expect(tooltips()).toHaveLength(1);
+    expect(tooltips()[0].className).toContain("chart__tip");
+    expect(tooltips()[0].textContent).toContain("60%");
+    expect(tooltips()[0].textContent).toContain("max 70%");
+    // The same tooltip also summarises the whole visible window, prefixed apart from the bucket values.
+    expect(tooltips()[0].textContent).toContain("window avg 35% · peak 70% · low 10%*");
+
+    key(gpu, "ArrowLeft");
+    expect(tooltips()[0].textContent).toContain("50%");
+    // Other charts read out the same timestamp.
+    expect(chart(container, "gpuTemp").querySelector('[data-readout="gpuTemp"]')!.textContent).toBe("54°C");
+
+    key(gpu, "Home");
+    expect(tooltips()[0].textContent).toContain("10%");
+    expect(chart(container, "llm-8888-gen").querySelector('[data-readout="genTps"]')!.textContent).toBe("40.0");
+    key(gpu, "ArrowRight");
+    expect(tooltips()[0].textContent).toContain("20%");
+
+    key(gpu, "Escape");
+    expect(container.querySelectorAll("[data-crosshair]")).toHaveLength(0);
+    expect(tooltips()).toHaveLength(0);
+  });
+
+  it("follows the pointer to the nearest bucket on every chart", async () => {
+    const { container } = await mount();
+    const net = plot(container, "network");
+    net.getBoundingClientRect = () => ({ left: 0, width: 600, top: 0, height: 90, right: 600, bottom: 90, x: 0, y: 0, toJSON: () => ({}) });
+    // 600 px for 6 minutes: x = 150 sits over the second bucket's middle.
+    act(() => {
+      net.dispatchEvent(new MouseEvent("pointermove", { clientX: 150, bubbles: true }));
+    });
+    const tip = container.querySelector("[data-tooltip]")!;
+    expect(tip.textContent).toContain("↓ rx2.0 KB/s");
+    expect(tip.textContent).toContain("↑ tx1.0 KB/s");
+    // One window line per series, each labelled so a multi-series panel stays readable.
+    expect(tip.textContent).toContain("window ↓ rx avg 2.0 KB/s · peak 4.0 KB/s · low 2.0 KB/s*");
+    expect(tip.textContent).toContain("window ↑ tx avg 1.0 KB/s · peak 1.0 KB/s · low 1.0 KB/s*");
+    expect(container.querySelectorAll("[data-crosshair]").length).toBe(chartsWithData(container).length);
+    expect(chart(container, "gpuUtil").querySelector('[data-readout="gpuUtil"]')!.textContent).toBe("20%");
+    act(() => {
+      net.dispatchEvent(new MouseEvent("pointerout", { bubbles: true, relatedTarget: document.body }));
+    });
+    expect(container.querySelectorAll("[data-crosshair]")).toHaveLength(0);
+  });
+
+  it("converts temperatures to °F when asked", async () => {
+    fetchHistory.mockResolvedValue(data());
+    const { container } = render(<HistoryPanel sparkId="spark-1" temperatureUnit="fahrenheit" />);
+    await flush();
+    expect(chart(container, "gpuTemp").querySelector('[data-readout="gpuTemp"]')!.textContent).toBe("131°F");
+  });
+
+  it("says when the server has the setting off", async () => {
+    const { container } = await mount({ enabled: false });
+    expect(container.textContent).toContain("Metrics history is off on the server");
+    expect(container.querySelector("[data-chart]")).toBeNull();
+  });
+
+  it("polls every 30 s and pauses while the tab is hidden", async () => {
+    vi.useFakeTimers();
+    let visibility: DocumentVisibilityState = "visible";
+    vi.spyOn(document, "visibilityState", "get").mockImplementation(() => visibility);
+    await mount();
+    expect(fetchHistory).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      vi.advanceTimersByTime(HISTORY_POLL_MS);
+    });
+    expect(fetchHistory).toHaveBeenCalledTimes(2);
+
+    visibility = "hidden";
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(HISTORY_POLL_MS * 3);
+    });
+    expect(fetchHistory).toHaveBeenCalledTimes(2);
+
+    visibility = "visible";
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(fetchHistory).toHaveBeenCalledTimes(3);
+  });
+
+  it("keeps the last data after a failed refresh but says it is stale, until a refresh succeeds", async () => {
+    vi.useFakeTimers();
+    const { container } = await mount();
+    expect(container.textContent).not.toContain("Stale");
+    fetchHistory.mockRejectedValueOnce(new Error("HTTP 502"));
+    await act(async () => {
+      vi.advanceTimersByTime(HISTORY_POLL_MS);
+    });
+    await flush();
+    const note = container.querySelector('[role="status"]');
+    expect(note?.textContent).toMatch(/^Stale: could not refresh \(HTTP 502\)\. Showing data from .+\.$/);
+    expect(chartsWithData(container).length).toBeGreaterThan(0);
+    await act(async () => {
+      vi.advanceTimersByTime(HISTORY_POLL_MS);
+    });
+    await flush();
+    expect(container.textContent).not.toContain("Stale");
+  });
+
+  it("does not poll while the panel is scrolled off screen", async () => {
+    let notify: ((entries: Array<{ isIntersecting: boolean }>) => void) | null = null;
+    vi.stubGlobal(
+      "IntersectionObserver",
+      class {
+        constructor(cb: (entries: Array<{ isIntersecting: boolean }>) => void) {
+          notify = cb;
+        }
+        observe() {}
+        disconnect() {}
+      },
+    );
+    fetchHistory.mockResolvedValue(data());
+    const { container } = render(<HistoryPanel sparkId="spark-1" temperatureUnit="celsius" />);
+    await flush();
+    expect(fetchHistory).not.toHaveBeenCalled();
+    expect(container.textContent).toContain("Loading history");
+    act(() => notify!([{ isIntersecting: true }]));
+    await flush();
+    expect(fetchHistory).toHaveBeenCalledTimes(1);
+    expect(container.querySelector("[data-chart]")).not.toBeNull();
+    act(() => notify!([{ isIntersecting: false }]));
+    expect(container.querySelector("[data-chart]")).not.toBeNull(); // the last answer stays
+  });
+
+  it("shows avg / peak / low for the visible window, flagging low when no true min is stored", async () => {
+    const { container } = await mount();
+    const gpu = chart(container, "gpuUtil").querySelector('[data-stat="gpuUtil"]')!;
+    expect(gpu.textContent).toMatch(/avg 35%/);
+    expect(gpu.textContent).toMatch(/peak 70%/);
+    expect(gpu.textContent).toMatch(/low 10%\*/);
+
+    // memFreeMB is the one series whose buckets keep a true minimum.
+    const mem = chart(container, "memFree").querySelector('[data-stat="memFreeMB"]')!;
+    expect(mem.textContent).toMatch(/avg 8\.8 GB/);
+    expect(mem.textContent).toMatch(/peak 9\.3 GB/);
+    expect(mem.textContent).toMatch(/low 6\.8 GB/);
+    expect(mem.textContent).not.toContain("*");
+  });
+});
+
+// ─── TensorFold cache history ────────────────────────────────────────────
+describe("HistoryPanel cache", () => {
+  const cacheData = () =>
+    data({
+      cache: {
+        range: "6h",
+        stepMs: STEP,
+        from: T0,
+        to: T0 + 6 * STEP,
+        endpoints: [
+          {
+            port: 8888,
+            engineEpoch: "1793692800123456789",
+            points: [0, 1, 2].map((i) => ({
+              t: T0 + i * STEP,
+              n: 30,
+              pool: {
+                capacity: 8_388_608,
+                active: 1_048_576,
+                prefix: 2_097_152 + i * 1024,
+                growth: 524_288,
+                unclaimed: 4_718_592 - i * 1024,
+              },
+              store: { held: 268_435_456, spare: 268_435_456, entries: 7, budget: 536_870_912 },
+              running: 2,
+              waiting: 0,
+              reusePct: 80 + i,
+              ttftP95: { value: 0.42, exact: false },
+            })),
+          },
+        ],
+        events: [{ t: T0 + STEP, port: 8888, kind: "engine_restart" }],
+      },
+    });
+
+  it("draws the shared pool stack and the cache scalar charts", async () => {
+    const { container } = await mount(cacheData());
+    const pool = container.querySelector<HTMLElement>("[data-cache-pool-chart]");
+    expect(pool).not.toBeNull();
+    expect(pool!.textContent).toContain("Shared pool");
+    expect(pool!.querySelectorAll("polygon[data-band]").length).toBeGreaterThan(0);
+    expect(chart(container, "cache-8888-reuse").textContent).toContain("Cache reuse");
+    expect(chart(container, "cache-8888-store").textContent).toContain("Snapshot store");
+  });
+
+  it("anchors itself for the live panel's cache-history link", async () => {
+    const { container } = await mount(cacheData());
+    expect(container.querySelector("#history")).not.toBeNull();
+  });
+
+  it("shows no pool chart when the engine reported none", async () => {
+    const { container } = await mount(data());
+    expect(container.querySelector("[data-cache-pool-chart]")).toBeNull();
+  });
+});

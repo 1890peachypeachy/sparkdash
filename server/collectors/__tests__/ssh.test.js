@@ -3,7 +3,8 @@ import { strict as assert } from "node:assert";
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { sshCommandSpec } from "../ssh.js";
+import { sshCommandSpec, sshExecOutcome, explainSshFailure } from "../ssh.js";
+import { decodeClixml } from "../windowsMetrics.js";
 
 beforeEach((t) => {
   for (const name of ["SSH_CONTROL_PERSIST_SECONDS", "SSH_CONTROL_PERSIST", "SSH_IDENTITY_FILE"]) {
@@ -188,4 +189,105 @@ test("sshCommandSpec: the legacy global switch still disables reuse", () => {
   }));
   assert.deepEqual(controlOptions(spec), ["ControlMaster=no", "ControlPath=none"]);
   assert.equal(spec.multiplex, null);
+});
+
+test("sshExecOutcome: a clean command yields trimmed stdout", () => {
+  assert.equal(sshExecOutcome({ error: null, stdout: " hi \n" }), "hi");
+});
+
+test("sshExecOutcome: nonzero exit keeps output only when the caller opts in", () => {
+  const error = Object.assign(new Error("Command failed"), { code: 1 });
+  assert.equal(sshExecOutcome({ error, stdout: "df table" }), null);
+  assert.equal(sshExecOutcome({ error, stdout: "df table", allowNonZeroExit: true }), "df table");
+});
+
+test("sshExecOutcome: timeouts and spawn failures never yield output", () => {
+  const killed = Object.assign(new Error("timed out"), { code: null, killed: true });
+  assert.equal(sshExecOutcome({ error: killed, stdout: "partial", allowNonZeroExit: true }), null);
+  const spawn = Object.assign(new Error("spawn ssh ENOENT"), { code: "ENOENT" });
+  assert.equal(sshExecOutcome({ error: spawn, stdout: "partial", allowNonZeroExit: true }), null);
+});
+
+test("sshExecOutcome: an opted-in failure with no output still rejects", () => {
+  const error = Object.assign(new Error("Permission denied"), { code: 255 });
+  assert.equal(sshExecOutcome({ error, stdout: "", allowNonZeroExit: true }), null);
+});
+
+test("sshExecOutcome: a transport failure never yields output even with stdout", () => {
+  const transport = Object.assign(new Error("Connection closed by remote host"), { code: 255 });
+  assert.equal(
+    sshExecOutcome({ error: transport, stdout: "partial table", allowNonZeroExit: true }),
+    null
+  );
+});
+
+test("explainSshFailure points Windows hosts at the Windows unit type and leaves other errors alone", () => {
+  const win = explainSshFailure("'true' is not recognized as an internal or external command, operable program or batch file.");
+  assert.match(win, /Windows/);
+  assert.match(win, /Windows PC with an NVIDIA GPU/);
+  assert.equal(explainSshFailure("Permission denied (publickey)."), "Permission denied (publickey).");
+});
+
+test("a Windows unit's command is sent as an encoded PowerShell argv, others unchanged", async () => {
+  const { remoteArgvFor } = await import("../ssh.js");
+  const win = remoteArgvFor({ platform: "windows" }, "echo ok");
+  assert.equal(win.length, 1);
+  assert.match(win[0], /^powershell .*-EncodedCommand [A-Za-z0-9+/=]+$/);
+  assert.deepEqual(remoteArgvFor({ platform: "linux" }, "echo ok"), ["echo ok"]);
+  assert.deepEqual(remoteArgvFor({}, "echo ok"), ["echo ok"]);
+});
+
+test("explainSshFailure names the administrators_authorized_keys file for a refused key on a Windows unit only", () => {
+  const denied = "Permission denied (publickey,password,keyboard-interactive).";
+  const win = explainSshFailure(denied, { windows: true });
+  assert.match(win, /administrators_authorized_keys/);
+  assert.match(win, /Administrators and SYSTEM/);
+  assert.equal(explainSshFailure(denied), denied);
+});
+
+test("decodeClixml returns the PowerShell stream text, and null for plain stderr", () => {
+  const clixml =
+    '#< CLIXML\n' +
+    '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04">' +
+    '<S S="Error">Get-CimInstance : Access is denied. _x000D__x000A_</S>' +
+    '<S S="Error">At line:1 char:1_x000D__x000A_</S>' +
+    '<S S="Debug">noise</S>' +
+    '</Objs>';
+  assert.equal(decodeClixml(clixml), "Get-CimInstance : Access is denied. At line:1 char:1");
+  // Entities and _xNNNN_ escapes come back as characters; &amp; must not re-expand.
+  assert.equal(
+    decodeClixml('#< CLIXML\n<Objs><S S="Error">a &lt;b&gt; &amp;amp; c_x0009_d</S></Objs>'),
+    "a <b> &amp; c d"
+  );
+  // CLIXML with no stream text at all is still recognised as CLIXML.
+  assert.equal(decodeClixml('#< CLIXML\n<Objs><Obj RefId="0"/></Objs>'), "");
+  assert.equal(decodeClixml("Permission denied (publickey)."), null);
+  assert.equal(decodeClixml(undefined), null);
+});
+
+test("explainSshFailure decodes a CLIXML error instead of showing the raw envelope", () => {
+  const denied =
+    '#< CLIXML\n<Objs><S S="Error">Get-CimInstance : Access is denied. _x000D__x000A_</S></Objs>';
+  const shown = explainSshFailure(denied, { windows: true });
+  assert.ok(!shown.includes("CLIXML"), shown);
+  assert.ok(!shown.includes("<Objs"), shown);
+  assert.match(shown, /Access is denied/);
+  // The common cause is not in the message itself, so name it.
+  assert.match(shown, /WMI\/CIM/);
+
+  // A CLIXML envelope with no message still says something usable.
+  const empty = explainSshFailure('#< CLIXML\n<Objs></Objs>', { windows: true });
+  assert.ok(!empty.includes("CLIXML"), empty);
+  assert.match(empty, /PowerShell reported a failure/);
+
+  // An unrelated PowerShell error is decoded without the WMI hint.
+  const other = explainSshFailure(
+    '#< CLIXML\n<Objs><S S="Error">nvidia-smi : The term is not recognized._x000D__x000A_</S></Objs>',
+    { windows: true }
+  );
+  assert.match(other, /nvidia-smi/);
+  assert.ok(!other.includes("WMI/CIM"), other);
+
+  // Plain stderr keeps its existing handling on every platform.
+  assert.equal(explainSshFailure("Permission denied (publickey)."), "Permission denied (publickey).");
 });

@@ -1,3 +1,5 @@
+import type { EnergyPricePeriod } from "../shared/energyTariff";
+
 // ─── Spark config (matches server/sparks.json) ────────────
 export interface SparkConfig {
   id: string;
@@ -5,10 +7,25 @@ export interface SparkConfig {
   /**
    * Unit type:
    * - spark: NVIDIA DGX Spark (default) — DGX Spark specs shown in the header.
-   * - host: any Linux box with an NVIDIA GPU (still monitored via nvidia-smi,
-   *   just not a Spark). Real hardware is auto-detected once online.
+   * - host: any Linux box with supported NVIDIA or AMD GPUs, just not a Spark.
+   *   Real hardware is auto-detected once online.
+   * - mac: an Apple Silicon Mac monitored over SSH with macOS tools
+   *   (sysctl, vm_stat, powermetrics) and the optional Mac node agent. Always remote.
    */
   kind?: "spark" | "host" | "mac";
+  /**
+   * Mac units only: read vitals + the runtime inventory from the on-device agent
+   * (`agents/macos/sparkdash_mac_agent.py --serve`) instead of SSH-only reads.
+   * Set `url` to override the whole endpoint, or `host`/`port` to build one.
+   */
+  agent?: MacAgentConfig | null;
+  /**
+   * Optional OS platform override for SSH-collected units. "linux" (default)
+   * uses /proc + vendor GPU tooling, "darwin" macOS hosts, "windows" Windows hosts
+   * (PowerShell collectors; NVIDIA via nvidia-smi, AMD iGPUs via GPU
+   * performance counters).
+   */
+  platform?: "linux" | "darwin" | "windows";
   lanIp: string;
   cx7Ip?: string | null;
   /**
@@ -84,6 +101,11 @@ export interface SparkConfig {
    * Report tailnet presence via `tailscale status --json` (default false; all roles).
    */
   tailscaleMonitoring?: boolean;
+  /**
+   * Show the display-carveout card: what spark-attic does with the GB10's
+   * display carveout and how much of it is lent (default false; Linux Sparks).
+   */
+  atticMonitoring?: boolean;
   /** When true, storage is only updated on manual refresh, not auto-polled. */
   storagePollDisabled?: boolean;
 }
@@ -191,22 +213,126 @@ export interface GpuThrottle {
   smClockMaxMHz: number | null;
   /** Current SM clock as % of max (0–100). null when clocks unavailable. */
   smClockPct: number | null;
+  /** Max graphics clock locked with `nvidia-smi -lgc` (MHz), from the sparkdash
+   *  gpu-clock-cap marker on the host. null/absent when no lock is recorded. */
+  clockCapMHz?: number | null;
   /** Human-readable active reasons (tooltip). */
   detail: string;
 }
 
+/** What keeps a cap across reboots on a unit: the systemd unit where passwordless
+ *  sudo reaches a root shell, the user's `@reboot` cron line where it does not, or
+ *  nothing at all. */
+export type GpuClockPersistKind = "unit" | "cron" | "none";
+
+/** GET /api/sparks/:id/gpu-clock: the GPU clock cap (`nvidia-smi -lgc`) and its boot hook. */
+export type GpuClockStatus =
+  | { supported: false; reason?: string }
+  | {
+      supported: true;
+      /** GPU maximum graphics clock (MHz). */
+      hwMaxMHz: number | null;
+      /** Cap in effect right now (MHz), null when none is recorded. */
+      capMHz: number | null;
+      /** The server accepts a typed sudo password on this connection (https or the machine itself). */
+      passwordAllowed?: boolean;
+  /** Settings allows typing it over plain http, so the page's secure-context check is skipped. */
+  plainPasswordAllowed?: boolean;
+      /** "root" runs directly, "yes" = passwordless sudo works, "no" = it does not. */
+      sudo: "root" | "yes" | "no";
+      /** What "keep after reboot" would install on this unit. */
+      persistKind: GpuClockPersistKind;
+      service: {
+        installed: boolean;
+        /** "min,max" the service applies at boot. */
+        clocks: string | null;
+        enabled: string | null;
+        active: string | null;
+      };
+      /** The fallback where the boot service cannot be installed. */
+      cron: {
+        installed: boolean;
+        /** "min,max" the @reboot job applies at boot. */
+        clocks: string | null;
+        /** The job ran at this boot and could not re-apply the cap. */
+        failed: boolean;
+      };
+    };
+
+/** POST /api/sparks/gpu-clock-all: per-unit outcome of a fleet-wide cap or reset. */
+export type FleetGpuClockResult =
+  | { id: string; ok: true; capMHz: number | null; persistKind: GpuClockPersistKind }
+  | { id: string; ok: true; supported: false; reason: string }
+  | { id: string; ok: false; error: string };
+/** One card in GET /api/sparks/:id/gpu-power. A value nvidia-smi could not give is null. */
+export interface GpuPowerCard {
+  /** nvidia-smi index, for display. Changes are made by `uuid`. */
+  index: number | null;
+  uuid: string;
+  name: string | null;
+  limitW: number | null;
+  /** Limit the card actually enforces; can be lower than `limitW`. */
+  enforcedW: number | null;
+  defaultW: number | null;
+  minW: number | null;
+  maxW: number | null;
+  /** The card reports a limit and a range, so a limit can be set. */
+  adjustable: boolean;
+  /** Limit the boot service sets for this card, null when it does not list it. */
+  bootW: number | null;
+}
+
+/** GET /api/sparks/:id/gpu-power: per-card power limits (`nvidia-smi -pl`) and their boot service. */
+export type GpuPowerStatus =
+  | { supported: false; reason?: string }
+  | {
+      supported: true;
+      cards: GpuPowerCard[];
+      /** The server accepts a typed sudo password on this connection (https or the machine itself). */
+      passwordAllowed?: boolean;
+      /** Settings allows typing it over plain http, so the page's secure-context check is skipped. */
+      plainPasswordAllowed?: boolean;
+      /** "root" runs directly, "yes" = passwordless sudo works, "no" = it does not. */
+      sudo: "root" | "yes" | "no";
+      service: {
+        installed: boolean;
+        enabled: string | null;
+        active: string | null;
+      };
+      /** Other enabled boot units on the host that also set a power limit. */
+      otherServices: string[];
+    };
+
 /** One health finding for a Spark (server rules in server/health/HealthEvaluator.js). */
 export interface HealthFinding {
-  id: "thermal" | "low-power" | "memory" | "xid" | "oom" | "concurrency" | "link-speed";
+  id: "thermal" | "low-power" | "memory" | "xid" | "oom" | "concurrency" | "link-speed" | "roce-link" | "roce-loss";
   severity: "warn" | "critical";
   title: string;
   detail: string;
   hint: string;
 }
 
+export interface GpuMetricAvailability {
+  temperature: boolean;
+  usage: boolean;
+  powerDraw: boolean;
+  powerLimit: boolean;
+  vramUsed: boolean;
+  vramTotal: boolean;
+}
+
 export interface GpuMetrics {
-  temperature: number;
+  vendors?: Array<"amd" | "nvidia" | "intel">;
+  metricAvailability?: GpuMetricAvailability;
+  temperature: number | null;
+  thermal?: { pressureState: string; lastRecordedEvents: string[]; source: string } | null;
   usage: number;
+  /** Mac pressure label; agent and SSH sources differ (see agents/macos/README.md). */
+  thermalPressure?: string | null;
+  /** Mac units: false when `sudo -n powermetrics` is not permitted, so GPU activity and power are unknown. */
+  powermetricsAvailable?: boolean;
+  /** Mac-agent units: what this node could not read (e.g. gpu.power without root). */
+  unavailable?: MetricGap[];
   power: {
     draw: number;
     limit: number;
@@ -224,8 +350,12 @@ export interface GpuMetrics {
   processes?: Array<{ pid: number; name: string; vramMB: number }>;
   /** NVIDIA clock throttle / thermal slowdown state from nvidia-smi. */
   throttle?: GpuThrottle | null;
-  /** Kernel NVRM NV_ERR_NO_MEMORY count since boot (cached ~60s). */
-  nvErrNoMemory?: number;
+  /**
+   * Kernel NVRM NV_ERR_NO_MEMORY count since boot (cached ~60s). null while the since-boot
+   * baseline is still being read a page at a time, or when the journal is unreadable: the
+   * count is unknown then, not zero.
+   */
+  nvErrNoMemory?: number | null;
   /** Kernel Xid errors and OOM-killer kills since boot (cached ~60s). null when the journal is unreadable. */
   kernelErrors?: { xid: number; oomKills: number; lastXid: string | null } | null;
   /**
@@ -236,10 +366,24 @@ export interface GpuMetrics {
   gpus?: GpuDevice[];
 }
 
-/** One physical GPU as reported by nvidia-smi (`index,name,uuid`). */
+export interface GpuPcieLink {
+  gen: number | null;
+  genMax: number | null;
+  width: number | null;
+  widthMax: number | null;
+}
+
+/** One physical GPU; `index` is a stable dashboard identity and `physicalIndex` is the vendor's index (nvidia-smi, amd-smi, or Intel sysfs). */
 export interface GpuDevice {
+  /** Stable dashboard identity; AMD indices use a separate internal range. */
   index: number;
+  /** Physical index reported by the vendor tool. */
+  physicalIndex?: number;
+  /** Absent on payloads from servers older than vendor tagging; treat as "nvidia". */
+  vendor?: "amd" | "nvidia" | "apple" | "intel";
+  metricAvailability?: GpuMetricAvailability;
   name: string | null;
+  /** NVIDIA GPU uuid; null for other vendors. */
   uuid: string | null;
   temperature: number;
   usage: number;
@@ -248,12 +392,24 @@ export interface GpuDevice {
   throttle?: GpuThrottle | null;
   /** Processes holding memory on this card only. */
   processes?: Array<{ pid: number; name: string; vramMB: number }>;
+  /** NVIDIA: fan speed in % of maximum (nvidia-smi fan.speed); null when the card reports none. */
+  fanPct?: number | null;
+  /** NVIDIA: PCIe link now and at its best (nvidia-smi pcie.link.*); null when unknown or not a PCIe-attached card. */
+  pcie?: GpuPcieLink | null;
+  /** Intel only: fan speed in rpm, null when the card has no fan sensor. */
+  fanRpm?: number | null;
+  /** Intel only: "debugfs" = measured VRAM use; "pci-bar" = total only, used is unknown (shown as 0). */
+  vramSource?: "debugfs" | "pci-bar";
 }
 
 // ─── CPU metrics ─────────────────────────────────────────
 export interface CpuMetrics {
   usage: number;
-  temperature: number;
+  /** False when the CPU usage read was unavailable; the numeric placeholder is not a measured zero. */
+  usageAvailable?: boolean;
+  /** Availability entries from the same CPU sample. */
+  unavailable?: MetricGap[];
+  temperature: number | null;
   /** What the temperature reading is: "CPU", or "ACPI"/"SoC" for a board zone. */
   temperatureLabel?: string | null;
   /** Raw sensor name behind the reading (e.g. "acpitz", "coretemp"). */
@@ -263,10 +419,25 @@ export interface CpuMetrics {
 }
 
 // ─── RAM metrics ─────────────────────────────────────────
+export type MacMemoryPressure = "normal" | "warning" | "critical" | "unknown";
+
+/** Disjoint physical RAM slices in MiB; GPU allocations belong within these slices. */
+export interface MacPhysicalMemory {
+  apps: number;
+  wired: number;
+  compressed: number;
+  cached: number;
+  free: number;
+  other: number;
+}
+
 export interface RamMetrics {
   used: number;
   total: number;
   percentage: number;
+  physical?: MacPhysicalMemory | null;
+  memoryPressure?: MacMemoryPressure;
+  swap?: { total: number; used: number; free: number };
 }
 
 // ─── Storage metrics ─────────────────────────────────────
@@ -304,6 +475,58 @@ export interface NetworkMetrics {
   wolMac?: string | null;
 }
 
+// ─── RoCE / RDMA (server/collectors/roce.js) ──────────────
+export interface RoceQos {
+  /** "pcp" or "dscp" (mlnx_qos "Priority trust state"). */
+  trust: string | null;
+  /** Priorities with PFC enabled; [] means PFC is off everywhere; null when mlnx_qos is unavailable. */
+  pfcPriorities: number[] | null;
+  cableLen: number | null;
+  /** priority -> DSCP values, present in DSCP trust mode. */
+  dscpMap: Record<string, number[]> | null;
+}
+
+export interface RoceDevice {
+  /** RDMA device, e.g. "rocep1s0f0". */
+  name: string;
+  /** Its network interface, e.g. "enp1s0f0np0". */
+  netdev: string | null;
+  state: string | null;
+  physState: string | null;
+  active: boolean;
+  /** Was ACTIVE at some point while sparkDash watched; an uncabled port never is. */
+  everActive: boolean;
+  rateGbps: number | null;
+  linkLayer: string | null;
+  operstate: string | null;
+  mtu: number | null;
+  speedMbps: number | null;
+  rxBps: number | null;
+  txBps: number | null;
+  /** RDMA payload throughput from the port's port_rcv_data / port_xmit_data counters, bytes/s. */
+  rdmaRxBps: number | null;
+  rdmaTxBps: number | null;
+  rxErrors: number | null;
+  txErrors: number | null;
+  rxDropped: number | null;
+  txDropped: number | null;
+  /** RDMA hw_counters, lifetime totals. */
+  counters: Record<string, number>;
+  /** Change since the previous sample. */
+  deltas: Record<string, number>;
+  loss: { rising: string[]; streak: number };
+  /** ethtool -S subset (discards, CRC, pause frames, per-priority). */
+  eth: Record<string, number> | null;
+  flowControl: { rx: boolean | null; tx: boolean | null } | null;
+  qos: RoceQos | null;
+}
+
+export interface RoceMetrics {
+  available: true;
+  sampledAt: number;
+  devices: RoceDevice[];
+}
+
 // ─── Unified memory metrics ──────────────────────────────
 export interface UnifiedMemoryMetrics {
   total: number;
@@ -312,28 +535,63 @@ export interface UnifiedMemoryMetrics {
   used: number;
   available: number;
   percentage: number;
-  oomRisk: "low" | "medium" | "high";
+  oomRisk: "low" | "medium" | "high" | null;
+  memoryPressure?: MacMemoryPressure;
+  physical?: MacPhysicalMemory | null;
+  swap?: { total: number; used: number; free: number };
   bandwidth: {
-    current: number;
+    /** GB/s; null when the local unit's dmon read failed or is unsupported (not measured). */
+    current: number | null;
     peak: number;
   };
 }
 
 // ─── LLM metrics ─────────────────────────────────────────
 export interface LlmMetrics {
+  /** The LLM port this snapshot came from — lets the UI match panels to probes by port, not array position. */
+  port?: number;
   available: boolean;
-  backend: "vllm" | "llama.cpp" | "sglang" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | null;
+  /** False when the endpoint answered but this poll's stats could not be read: its rates are unknown, not zero. */
+  measurementValid?: boolean;
+  /** Why the last poll's stats could not be read; null while they can. */
+  measurementError?: string | null;
+  backend: "vllm" | "llama.cpp" | "sglang" | "lmstudio" | "ollama" | "ds4" | "exl3" | "q27" | "tensorfold" | "freetoken" | "radiance" | "strata" | "flare" | "locals" | "splash" | "pico" | "ignis" | null;
+  /** How the monitor reaches the engine: its own address, or an SSH forward when only SSH gets there. */
+  via?: "direct" | "ssh-tunnel";
   modelId: string | null;
   modelPath: string | null;
+  /** Engine version from vLLM's GET /version; null when the backend reports none or it could not be read. */
+  engineVersion?: string | null;
+  /** Exact served request IDs from /v1/models, in response order. */
+  models?: string[];
   contextLength: number | null;
   /** GPU memory utilization for the LLM engine (0–1), e.g. 0.9. Only from vLLM internal info. */
   gpuMemoryUtilization: number | null;
-  slotsActive: number;
+  /** Occupied slots; null when the backend does not report occupancy. */
+  slotsActive: number | null;
   slotsTotal: number;
   generationTps: number;
+  /** How generationTps was measured when a backend exposes a fallback. */
+  generationTpsSource?: "window" | "slot-mean" | "probe-sample" | "dashboard-stream" | null;
+  /**
+   * Average decode tok/s of ONE stream (aggregate ÷ active streams when all
+   * decode in lockstep). Only engines publishing a per-token latency histogram
+   * report it; null otherwise.
+   */
+  perStreamTps?: number | null;
+  /**
+   * Prefill rate over completed requests, held for up to 20 seconds.
+   * This effective rate includes cache credit; see prefillTpsSource.
+   * Not continuously measured live or an individual-request rate.
+   */
+  perStreamPrefillTps?: number | null;
+  /** TensorFold: live throughput or a held, cache-inclusive completed-request window. */
+  prefillTpsSource?: "live" | "completed-effective" | "completed-split" | null;
   prefillTps: number;
   /** A prompt is being processed right now. With no live rate available (TensorFold reports totals only for finished requests) the UI says "prefilling" instead of 0. */
   prefillActive?: boolean;
+  /** A request is generating right now, even when the backend has no live rate. */
+  decodeActive?: boolean;
   /** Live cached-prefill tok/s when the backend splits kinds (ds4, llama.cpp, sglang). */
   cachedPrefillTps?: number | null;
   /** Live uncached/computed prefill tok/s when split is available. */
@@ -345,10 +603,30 @@ export interface LlmMetrics {
   /** Cumulative total prompt (prefill) tokens as reported by the LLM server. null when the backend does not expose it. */
   totalPromptTokens: number | null;
   /**
+   * TensorFold live prompt-position gauge: tokens of the prompt currently being
+   * prefilled (`tensorfold:prefill_progress_tokens`). It advances during a long
+   * prefill while the completed counters stay frozen. null when the build does
+   * not publish it or the last full /metrics scrape failed.
+   */
+  prefillProgressTokens?: number | null;
+  /**
+   * TensorFold live generation position: `generation_tokens_total` plus the
+   * nonnegative `generation_tokens_running`. null when unavailable.
+   */
+  generationProgressTokens?: number | null;
+  /**
    * Share of the engine's KV cache pool held by requests (0–1): vLLM, q27,
    * SGLang (`token_usage`) and TensorFold (`pool_tokens`). null when unknown.
    */
   kvCacheUsage?: number | null;
+  /**
+   * TensorFold's own cache observation (`/health.live.cache`): the shared pool's disjoint
+   * categories, the prompt-state snapshot store, and the engine's limits. Never derived from
+   * `kvCacheUsage`, which is one stream's share of its window. Null for other backends.
+   */
+  cache?: LlmCacheMetrics | null;
+  /** Cumulative TTFT / request-latency histogram buckets for the history sampler. TensorFold only. */
+  cacheHistograms?: LlmCacheHistograms | null;
   /** Allocated KV-cache pool in tokens (vLLM `cache_config_info`). null when unknown. */
   kvCacheTokens?: number | null;
   /** Free tokens in that pool (pool × (1 − usage)). null when pool or usage is unknown. */
@@ -389,6 +667,82 @@ export interface LlmMetrics {
    */
   lastActiveAt?: number | null;
   error: string | null;
+}
+
+/**
+ * One TensorFold cache observation. `status` decides what may be read:
+ * - full: pool and an enabled prompt-state store are both present and consistent;
+ * - partial: one of them is (a disabled store is partial, not absent);
+ * - unavailable: the engine publishes no cache group (an older build) — not a measured 0;
+ * - inconsistent: the engine itself reports accounting that does not add up; no values;
+ * - unsupported: a schema version this dashboard does not read; no values;
+ * - invalid: the group was not an object.
+ */
+export interface LlmCacheMetrics {
+  status: "full" | "partial" | "unavailable" | "inconsistent" | "unsupported" | "invalid";
+  source: "health";
+  schemaVersion?: number | null;
+  /** Engine process identity (a u64 nanosecond stamp as a string), for reset detection. */
+  engineEpoch?: string | null;
+  /** Engine-clock epoch ms of the observation; null when absent. */
+  observedAt?: number | null;
+  /** One request's positions at most. */
+  contextLimitPositions?: number | null;
+  /** Requests the engine admits at once. */
+  streamCapacity?: number | null;
+  pool?: LlmCachePool | null;
+  promptState?: LlmCachePromptState | null;
+  /** Which groups were missing from a consistent report: "pool", "prompt_state". */
+  missing?: string[];
+  reason?: string | null;
+}
+
+/**
+ * The shared pool in positions. The four categories are a partition of `capacityPositions`;
+ * `invalidationsTotal` counts valid-to-stale transitions (a later resume of that prefix must
+ * reprocess it), `placementBlocksTotal` counts placements refused for lack of room.
+ */
+export interface LlmCachePool {
+  capacityPositions: number;
+  activeReservedPositions: number;
+  retainedPrefixPositions: number;
+  retainedGrowthPositions: number;
+  unclaimedPositions: number;
+  validStates: number | null;
+  invalidationsTotal: number | null;
+  placementBlocksTotal: number | null;
+}
+
+/**
+ * The prompt-state snapshot store: a byte budget separate from the pool. `heldBytes` is charged
+ * storage, `spareBytes` reusable backend storage; `failuresTotal` is the legacy aggregate and the
+ * three stages partition it (null on a build that predates the classification).
+ */
+export interface LlmCachePromptState {
+  enabled: boolean;
+  budgetBytes: number | null;
+  heldBytes: number | null;
+  spareBytes: number | null;
+  entries: number | null;
+  hitsTotal: number | null;
+  missesTotal: number | null;
+  evictionsTotal: number | null;
+  refusalsTotal: number | null;
+  failuresTotal: number | null;
+  failuresKeepTotal: number | null;
+  failuresRestoreTotal: number | null;
+  failuresPeerForgetTotal: number | null;
+}
+
+/** Cumulative Prometheus-style bucket counts; `edges` ends at Infinity. */
+export interface LlmCacheHistogram {
+  edges: number[];
+  counts: number[];
+}
+
+export interface LlmCacheHistograms {
+  ttft: LlmCacheHistogram;
+  latency: LlmCacheHistogram;
 }
 
 /** One UTC day of busy tok/s rollups (null avg = no busy samples). */
@@ -465,6 +819,9 @@ export interface ComfyLastJob {
 export interface ComfyModelsInstalled {
   checkpoints: string[];
   loras: string[];
+  diffusionModels?: string[];
+  textEncoders?: string[];
+  vae?: string[];
 }
 
 export interface ComfyMetrics {
@@ -514,6 +871,71 @@ export interface TailscaleMetrics {
   error: string | null;
 }
 
+/** attic.service's state on the unit; nulls when systemd could not be asked. */
+export interface AtticUnit {
+  /** false: not installed. */
+  present: boolean | null;
+  /** true while it runs, false when stopped or failed, null while it starts or stops. */
+  active: boolean | null;
+  /** systemd's ActiveState ("active", "inactive", "failed", …) or "not installed". */
+  state: string | null;
+}
+
+/**
+ * spark-attic's keyless status file. The numbers are set only while it is
+ * fresh (status "ready" or "refusing"): a stale file says nothing about what
+ * is lent now.
+ */
+export interface AtticStatus {
+  /**
+   * ready / refusing: atticd's own state. stale: not rewritten for three of its
+   * periods (atticd is not running). unreadable: no permission, or not a
+   * spark-attic status file. unknown: no clock reading to judge it by.
+   */
+  status: "ready" | "refusing" | "stale" | "unreadable" | "unknown";
+  /** Why atticd refuses, or why the file could not be read. */
+  why: string | null;
+  version: string | null;
+  driver: string | null;
+  /** "heap" or "list". */
+  mode: string | null;
+  /** The running driver's build is validated for this mode. */
+  validated: boolean | null;
+  validatedAt: string | null;
+  sizeMib: number | null;
+  freeMib: number | null;
+  largestMib: number | null;
+  lentMib: number | null;
+  /** Given back by clients, not yet free (CUDA may still map it). */
+  drainingMib: number | null;
+  clients: number | null;
+  /** Seconds since atticd last wrote the file, by the unit's own clock. */
+  ageS: number | null;
+  everyS: number | null;
+}
+
+/**
+ * What spark-attic does on the unit. lending: atticd lends (`attic.lentMib`
+ * of `attic.sizeMib`). refusing: it lends nothing, `attic.why` says why.
+ * unvalidated: it lends nothing until the running driver is validated. off:
+ * attic.service is stopped or failed. not installed: no attic.service and no
+ * status file. unknown: the probe failed, or its answer cannot be trusted (a
+ * stale or unreadable status file, no clock, no systemd, a unit that runs
+ * without its file).
+ */
+export type AtticState = "lending" | "refusing" | "unvalidated" | "off" | "not installed" | "unknown";
+
+export interface AtticMetrics {
+  /** True when the probe ran and its output was understood. */
+  available: boolean;
+  state: AtticState;
+  /** spark-attic's status file; null when there is none. */
+  attic: AtticStatus | null;
+  /** attic.service, atticd's unit. */
+  atticd: AtticUnit;
+  error: string | null;
+}
+
 // ─── Full metrics snapshot ────────────────────────────────
 export interface SparkMetrics {
   gpu: GpuMetrics | null;
@@ -521,25 +943,133 @@ export interface SparkMetrics {
   ram: RamMetrics | null;
   storage: StorageMetrics[];
   network: NetworkMetrics | null;
+  /** RoCE / RDMA ports; null when the unit has no RDMA devices. */
+  roce?: RoceMetrics | null;
   unifiedMemory: UnifiedMemoryMetrics | null;
   /** Array of LLM metrics, one per configured port. Empty array when no ports. */
   llm: LlmMetrics[];
+  /** Loaded models discovered in private vLLM containers over SSH; no throughput claim. */
+  residentModels?: Array<{ modelId: string; container: string }>;
   /** ComfyUI probe result when monitoring is enabled; null when off or not yet polled. */
   comfy?: ComfyMetrics | null;
   /** Tailnet probe result when monitoring is enabled; null when off or not yet polled. */
   tailscale?: TailscaleMetrics | null;
+  /** Display-carveout probe result when monitoring is enabled; null when off or not yet polled. */
+  attic?: AtticMetrics | null;
+  /**
+   * Mac-agent units: model runtimes detected on the machine. null for other
+   * transports (DGX Sparks, macs read over SSH) — an empty array only when the
+   * agent actually answered and found nothing serving.
+   */
+  runtimes?: MacRuntime[] | null;
+  /** Mac-agent units: metrics the node declared unavailable (never zeroed). */
+  unavailable?: MetricGap[] | null;
+  /** Mac-agent units: whether the agent answered the last runtime poll. */
+  agentOnline?: boolean | null;
+}
+
+// ─── Mac node agent ──────────────────────────────────────────
+export interface MacAgentConfig {
+  /** Full base URL, e.g. http://100.64.0.10:8790 (wins over host/port). */
+  url?: string | null;
+  /** Host to reach the agent on; defaults to the unit's probe host. */
+  host?: string | null;
+  /** Agent listen port (default 8790). */
+  port?: number | null;
+  /** Optional user-agent control port when telemetry uses a privileged collector. */
+  controlPort?: number | null;
+}
+
+/** One detected model runtime, from the Mac agent's data-driven inventory. */
+export interface MacRuntime {
+  /** Inventory name — e.g. "omlx", "splash-35b", "tensorfold", or "other-runtime". */
+  name: string;
+  /** Display label; for other-runtime this is the command basename. */
+  label: string;
+  /** "server" (owns a listener) or "watchdog" (a launcher, not serving). */
+  role: string;
+  pid: number;
+  command: string;
+  script?: string | null;
+  port: number | null;
+  /** Served model id when argv or the server's own API exposes one. */
+  model?: string | null;
+  /** "serving" (health path answered) | "listening" | "running". */
+  state: string;
+  detectedBy: string;
+  health?: { ok: boolean; url: string };
+}
+
+/** A metric this node could not read, with the reason shown in the UI. */
+export interface MetricGap {
+  metric: string;
+  reason: string;
+}
+
+/** One launchable catalog entry from the Mac agent's control endpoint. */
+export interface RuntimeControlTarget {
+  name: string;
+  label: string;
+  group: string;
+  groupLabel: string;
+  models: { id: string; label: string }[];
+  startable: boolean;
+  stoppable: boolean;
+  reason?: string | null;
+}
+
+/**
+ * Mac runtime control as the dashboard server reports it.
+ * `serving` is null when the probe did not answer — that is not "nothing serving".
+ */
+export interface RuntimeControlView {
+  state: "ready" | "unavailable" | "denied";
+  reason: string | null;
+  serving: MacRuntime[] | null;
+  targets: RuntimeControlTarget[];
+  error?: string | null;
+  output?: string | null;
+  ok?: boolean;
+  authorized?: boolean;
+  /** Browser transport failed; the action's outcome must be reconciled by polling. */
+  transportError?: boolean;
+  busy?: boolean;
+  operation?: {
+    id: string;
+    state: "running" | "complete";
+    runtime?: string;
+    model?: string;
+    action?: string;
+    ok?: boolean;
+    error?: string | null;
+    output?: string | null;
+  };
 }
 
 // ─── Spark snapshot (server pushes this) ──────────────────
+/** Hint attached to a head whose engine answers on a paired worker (#271). */
+export interface LlmMovedToWorker {
+  workerId: string;
+  workerName: string;
+  port: number;
+  modelId: string | null;
+  backend: string | null;
+  message: string;
+}
+
 export interface SparkSnapshot {
   id: string;
+  /** Configured Mac collection transport; independent of current agent reachability. */
+  macTransport?: "ssh" | "agent";
   /** Active health findings, most important first is not guaranteed; sort with sortFindings. */
   health?: HealthFinding[];
   name: string;
   /** Why the last liveness check failed, when offline. null/absent when online. */
   offlineReason?: string | null;
-  /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
+  /** Unit type: spark (DGX Spark), host (dedicated GPU Linux box), or mac (Apple Silicon). */
   kind?: "spark" | "host" | "mac";
+  /** OS of an SSH-collected unit; Windows units have no model launchers or CPU temperature. */
+  platform?: "linux" | "darwin" | "windows";
   online: boolean;
   /** Uptime in seconds, or null when offline */
   uptime: number | null;
@@ -563,6 +1093,11 @@ export interface SparkSnapshot {
   workerDerivedLabel?: string | null;
   /** Optional head Spark id when role is worker */
   workerHeadId?: string | null;
+  /**
+   * Head only: the engine answers on a paired worker while every head port is down (#271).
+   * Display-only hint — sparkDash never swaps roles itself.
+   */
+  llmMovedTo?: LlmMovedToWorker | null;
   /** Standalone: whether LLM is probed (head always true, worker always false) */
   llmMonitoring?: boolean;
   /** LLM server port (first port, for backward compat) */
@@ -577,10 +1112,14 @@ export interface SparkSnapshot {
   comfyPort?: number;
   /** Whether tailnet presence is probed (opt-in; all roles) */
   tailscaleMonitoring?: boolean;
+  /** Whether the display carveout is probed (opt-in; Linux Sparks) */
+  atticMonitoring?: boolean;
   /** Hermes Agent update monitoring state (present in every snapshot). */
   hermes?: HermesStatus;
   hardware: HardwareInfo;
   metrics: SparkMetrics;
+  /** Harness sessions by LLM port. Absent until the occupancy poller has a projection. */
+  conversations?: Record<string, ConversationRow[]>;
 }
 
 // ─── WebSocket envelope ───────────────────────────────────
@@ -590,6 +1129,107 @@ export interface WsSnapshot {
   generatedAt?: number;
   sparks: SparkSnapshot[];
   refreshInterval: number;
+  /** Alert notifications' firing set — present only while `alertsEnabled` is on. */
+  alerts?: { active: AlertInstance[] };
+}
+
+// ─── Alert notifications (server/alerts) ──────────────────
+export type AlertSeverity = "warning" | "critical";
+
+/**
+ * One pending or firing alert (GET /api/alerts, WS `alerts.active`). The
+ * condition is a Health finding or an Overview strip exception; `ruleId` is the
+ * finding id (thermal, memory, …) or the strip's (offline, throttle, disk, llm, tailnet).
+ */
+export interface AlertInstance {
+  /** `${unitId}:${ruleId}` — the same key the Overview strip uses. */
+  key: string;
+  ruleId: string;
+  ruleName: string;
+  unitId: string;
+  unitName: string;
+  severity: AlertSeverity;
+  /** Highest severity reached while firing (a resolved alert is routed by it). */
+  peakSeverity?: AlertSeverity;
+  state: "pending" | "firing";
+  /** Short predicate after the unit name ("GPU is running hot"). */
+  label: string;
+  summary: string;
+  /** Epoch ms the condition first held — survives a server restart. */
+  startsAt: number;
+  firingAt: number | null;
+}
+
+/** One firing / resolved transition (newest first in `recent`). */
+export interface AlertEvent {
+  id: number;
+  at: number;
+  status: "firing" | "resolved";
+  key: string;
+  ruleId: string;
+  ruleName: string;
+  unitId: string;
+  unitName: string;
+  severity: AlertSeverity;
+  label: string;
+  summary: string;
+  startsAt: number;
+  endsAt: number | null;
+}
+
+export interface AlertsResponse {
+  enabled: boolean;
+  active: AlertInstance[];
+  pending: AlertInstance[];
+  recent: AlertEvent[];
+}
+
+/** A rule as GET /api/alerts/config describes it: where it comes from, on/off and `for`. */
+export interface AlertRule {
+  id: string;
+  name: string;
+  description: string;
+  source: "health" | "strip";
+  defaults: { enabled: boolean; forSec: number };
+  /** Only the values the user changed. */
+  overrides: { enabled?: boolean; forSec?: number };
+}
+
+export type AlertChannelType = "ntfy" | "discord" | "slack" | "gotify" | "webhook";
+
+export interface AlertChannel {
+  /** Absent on a channel added in the dialog and not yet saved. */
+  id?: string;
+  name: string;
+  type: AlertChannelType;
+  /** Masked by the server (`https://ntfy.sh…ab12`); send it back unchanged to keep it. */
+  url: string;
+  /** The server has a URL for this channel (in its encrypted secrets store). */
+  hasUrl?: boolean;
+  enabled: boolean;
+  minSeverity: AlertSeverity;
+  /** `lastError` is a status code or a fixed reason, never a server's answer. */
+  status?: { lastSentAt: number | null; lastError: string | null; lastErrorAt: number | null };
+}
+
+export interface AlertsConfig {
+  enabled: boolean;
+  /** 0 = no reminders while an alert keeps firing. */
+  repeatIntervalMin: number;
+  rules: AlertRule[];
+  channels: AlertChannel[];
+}
+
+export interface AlertsConfigUpdate {
+  repeatIntervalMin?: number;
+  rules?: Record<string, { enabled?: boolean; forSec?: number }>;
+  channels?: AlertChannel[];
+}
+
+export interface AlertTestResult {
+  ok: boolean;
+  status?: number;
+  error?: string;
 }
 
 export interface FleetEnergy {
@@ -599,6 +1239,8 @@ export interface FleetEnergy {
   trackedNodeIds: string[];
   currentNodeIds: string[];
   freshNodeCount: number;
+  /** Tracked nodes without a fresh power reading right now (offline or stale telemetry). */
+  staleNodeIds?: string[];
   currentWatts30s: number | null;
   energy24hKwh: number | null;
   energy31dKwh: number | null;
@@ -611,7 +1253,50 @@ export interface FleetEnergy {
   coverage31dWindowMs?: number;
   nodeCoverage24hMs: Record<string, number>;
   nodeCoverage31dMs: Record<string, number>;
+  /**
+   * Mean watts per hour of the reporting series: the sum over the machines that reported,
+   * so one sleeping unit no longer blanks the slot. Falls back to the full-fleet series on
+   * records written before it existed.
+   */
   hourlyWatts24h: Array<number | null>;
+  /** How many nodes each hourly figure was summed over (null = no data in that slot). */
+  hourlyReportingNodeCount24h?: Array<number | null>;
+  /** Wall power from external meters; present only while power meters are configured. */
+  wall?: FleetWallEnergy;
+}
+
+/**
+ * Wall power in the shape of FleetEnergy's own fields. Energy and coverage include time
+ * filled from the estimate (estimate × the node's learned wall/estimate ratio).
+ */
+export interface FleetWallEnergy {
+  /** Nodes with a meter. */
+  nodeIds: string[];
+  /** Metered nodes whose last reading is fresh. */
+  freshNodeIds: string[];
+  /** Nodes counted at estimate × ratio right now (no fresh reading, or no meter). */
+  filledNodeIds: string[];
+  staleNodeIds: string[];
+  /** Ratio used to fill each node (its own, else the fleet's); null = not learned yet. */
+  ratios: Record<string, number | null>;
+  ownRatios: Record<string, number | null>;
+  fleetRatio: number | null;
+  currentWatts30s: number | null;
+  /** True when the current figure includes filled nodes. */
+  currentFilled: boolean;
+  energy24hKwh: number | null;
+  filledEnergy24hKwh: number | null;
+  energy31dKwh: number | null;
+  whPerOutputToken24h: number | null;
+  coverage24hMs: number;
+  coverage24hWindowMs: number;
+  coverage31dMs: number;
+  coverage31dWindowMs: number;
+  nodeCoverage24hMs: Record<string, number>;
+  nodeCoverage31dMs: Record<string, number>;
+  hourlyWatts24h: Array<number | null>;
+  /** Absent on wall power: its fleet series stays full-fleet only. */
+  hourlyReportingNodeCount24h?: Array<number | null>;
 }
 
 // ─── API responses ────────────────────────────────────────
@@ -628,9 +1313,37 @@ export interface HealthResponse {
   authMode: AuthMode;
   errors: string[];
   warnings: string[];
+  /** The running server's package version; absent on servers that predate the field. */
+  version?: string | null;
+}
+
+export interface InferenceActivity {
+  enabled: boolean;
+  available: boolean;
+  /** Approved non-secret display labels, never API keys. */
+  labels: string[];
+  generatedAt: string | null;
+  error: string | null;
+  active: Array<{
+    principal: string;
+    model: string;
+    count: number;
+    oldestAgeMs: number;
+    newestAgeMs: number;
+  }>;
+  recent: Array<{
+    principal: string;
+    model: string;
+    durationMs: number;
+    status: number | null;
+    observedAt: string;
+  }>;
+  overflowed: boolean;
 }
 
 export interface Settings {
+  /** Read-only server capability; configured through environment variables. */
+  inferenceActivityEnabled?: boolean;
   pollIntervalMs: number;
   defaultLlmPort: number;
   autoHideOffline: boolean;
@@ -648,18 +1361,261 @@ export interface Settings {
   /** Overview search field + status filter. Off by default. */
   showOverviewSearch: boolean;
   showLlmTokenTotals: boolean;
+  /** Overview KPI tiles and the Recent activity card; each can be hidden. All on by default. */
+  showKpiDecode?: boolean;
+  showKpiPower?: boolean;
+  showKpiMemory?: boolean;
+  showKpiTokens?: boolean;
+  showActivityFeed?: boolean;
   /** Benchmark dialogs offer "Copy image" — a PNG share card of the results. */
   benchShareImage: boolean;
+  /** IANA time zone for the Tokens, Energy and Activity charts; "" follows the browser. */
+  timeZone?: string;
   /** Electricity price per kWh for cost estimates on the energy page; null = not set. */
   energyPricePerKwh: number | null;
   /** Currency symbol shown with cost estimates. */
   energyCurrency: string;
+  /** "tou": the hours in energyPricePeriods have their own price; other hours cost energyPricePerKwh. */
+  energyPriceMode?: "flat" | "tou";
+  /** Time-of-use periods (whole local hours [from, to), wrapping past midnight when from > to). */
+  energyPricePeriods?: EnergyPricePeriod[];
   /**
    * VRAM bars split by engine / system / free and judged by headroom. On by
    * default (server DEFAULTS and the UI's pre-load fallback both say true).
    */
   showVramBreakdown: boolean;
+  /** Serve GET /metrics in Prometheus text format. Off by default (404 when off). */
+  prometheusExport: boolean;
+  /** Allow typing a sudo password over plain http from another machine. Off by default. */
+  allowPlainSudoPassword?: boolean;
+  /** Let the Intel (xe) probe read debugfs VRAM through sudo -n. Off by default. */
+  intelVramSudo: boolean;
+  /**
+   * Keep 48 h / 30 days of per-unit history on the server and chart it in a History
+   * panel on the unit page. Off by default.
+   */
+  metricsHistory?: boolean;
+  /** Alert notifications (Settings → Alerts). Off by default; while off nothing is evaluated or sent. */
+  alertsEnabled?: boolean;
+  /** Publish the activity feed and per-unit readings to an MQTT broker. Off by default. */
+  mqttEnabled: boolean;
+  /** Broker URL: mqtt://, mqtts://, ws:// or wss://. */
+  mqttUrl: string;
+  /** Broker username, if any; the password comes from SPARKDASH_MQTT_PASSWORD. */
+  mqttUsername: string;
+  /** Topic root for everything published (events, status, metrics). */
+  mqttTopicPrefix: string;
+  /** Publish Home Assistant MQTT discovery configs (requires MQTT publishing). */
+  mqttDiscovery: boolean;
+  /** Discovery prefix — match the integration's setting in Home Assistant (default "homeassistant"). */
+  mqttDiscoveryPrefix: string;
+  /** Read-only API Keys page (LiteLLM keys via a host bridge). Off by default; while off there is no nav entry. */
+  apiKeysEnabled?: boolean;
+  /**
+   * Hide harness sessions older than this. Finite: 1 minute through 14 days.
+   * Missing or out of range becomes 12 hours.
+   */
+  occupancyMaxAgeMs: number;
+  /**
+   * GPU temperature (°C) at which the Health finding warns, and at which it turns
+   * critical. Defaults 85 and 90; warn is always below critical. Alerts reuse the finding.
+   */
+  healthTempWarnC: number;
+  healthTempCriticalC: number;
+  /** Stream-sample engines without gauges (Pico): measured from one tiny streamed completion every 15 s. Off by default. */
+  llmStreamSample?: boolean;
 }
+
+export type OccupancyBadge = "unknown" | "generating" | "stalled";
+
+export interface ConversationRow {
+  id: string;
+  source: string;
+  handle: string;
+  badge: OccupancyBadge;
+  port: number;
+  routingProvenance?: string;
+  stale?: boolean;
+  lastUsedAt?: number;
+  agent?: string;
+  contextUsed?: number | null;
+  contextWindow?: number | null;
+  contextApprox?: boolean;
+}
+
+export interface OccupancyRoute {
+  harness: string;
+  sparkId: string;
+  port: number;
+  cwdPrefix?: string;
+}
+
+export interface OccupancyHelper {
+  id: string;
+  label: string;
+  url: string;
+  enabled: boolean;
+  harnesses: string[];
+  routes: OccupancyRoute[];
+  hasToken: boolean;
+}
+
+export interface OccupancyHelperInput {
+  id?: string;
+  label?: string;
+  url: string;
+  enabled?: boolean;
+  harnesses: string[];
+  routes: OccupancyRoute[];
+  token?: string;
+}
+
+export interface OccupancyAdapterSummary {
+  coverage: "supported" | "unsupported" | "unavailable" | "partial" | string;
+  stale: boolean;
+  rows: number;
+  /** Rows this adapter lost to the shared 500-row budget; 0 means all were included. */
+  dropped: number;
+  error: string | null;
+}
+
+export interface OccupancyCheck {
+  ok: boolean;
+  observedAt: number;
+  adapters: Record<string, OccupancyAdapterSummary>;
+  rowCount: number;
+}
+
+// ─── Unit history (GET /api/sparks/:id/history) ──────────
+export type MetricsHistoryRange = "1h" | "6h" | "24h" | "7d" | "30d";
+
+/** One series in one bucket. `min` only on memFreeMB (headroom's low point). */
+export interface HistoryStat {
+  avg: number;
+  max: number;
+  min?: number;
+}
+
+/** Unit-level series: %, °C, W, MB, bytes/s. */
+export type HistoryUnitSeries =
+  | "gpuUtil"
+  | "gpuTemp"
+  | "gpuPower"
+  | "memUsedMB"
+  | "memFreeMB"
+  | "memAvailableMB"
+  | "memGpuMB"
+  | "memSysMB"
+  | "cpuUtil"
+  | "cpuTemp"
+  | "ramUsedMB"
+  | "netRx"
+  | "netTx";
+
+/** Per LLM endpoint: tok/s, and the KV pool fill as 0–1. */
+export type HistoryLlmSeries = "genTps" | "prefillTps" | "kvUsage";
+
+/** A bucket; a series the unit did not report in it is absent (a gap). */
+export type HistoryPoint = { t: number } & Partial<Record<HistoryUnitSeries, HistoryStat>>;
+export type HistoryLlmPoint = { t: number } & Partial<Record<HistoryLlmSeries, HistoryStat>>;
+
+export interface MetricsHistoryData {
+  enabled: true;
+  range: MetricsHistoryRange;
+  /** Bucket width of the points; a jump larger than this is a gap. */
+  stepMs: number;
+  /** Window the range covers (epoch ms); the x-axis spans exactly this. */
+  from: number;
+  to: number;
+  points: HistoryPoint[];
+  llm: Array<{ port: number; points: HistoryLlmPoint[] }>;
+  /** TensorFold shared-cache history: a separate grid fed by counter deltas. Null when absent. */
+  cache?: MetricsHistoryCache | null;
+}
+
+/**
+ * One aggregated cache bucket. Every field is optional: a bucket exists only where an observation
+ * landed, and a figure the engine did not report stays absent rather than zero.
+ */
+export interface MetricsHistoryCachePoint {
+  t: number;
+  /** Observations behind this bucket. */
+  n: number;
+  /** Sum of valid observation-pair durations, not assumed wall-clock coverage. Absent on legacy data. */
+  coveredMs?: number;
+  coveragePartial?: boolean;
+  histogramSamples?: { ttft: number; latency: number };
+  /** Pool in positions: means of the categories, `capacity` is the bucket's effective step value. */
+  pool?: {
+    capacity: number;
+    active: number | null;
+    prefix: number | null;
+    growth: number | null;
+    unclaimed: number | null;
+  };
+  /** Bucket peaks of the pool categories. */
+  poolMax?: { active: number | null; prefix: number | null; growth: number | null };
+  /** The pool capacity or the snapshot budget changed inside this bucket (a configuration step). */
+  capacityChanged?: boolean;
+  budgetChanged?: boolean;
+  /** Snapshot store: charged/spare bytes (mean), budget bytes (step), entries (mean). */
+  store?: { held: number | null; spare: number | null; entries: number | null; budget: number | null };
+  running?: number;
+  waiting?: number;
+  validStates?: number;
+  /** Token-weighted reuse over the bucket: cached prompt tokens / prompt tokens. */
+  reusePct?: number;
+  promptTokens?: number;
+  cachedTokens?: number;
+  completions?: number;
+  /** Counter deltas: replacements, invalidations, refusals, classified failures. */
+  churn?: Partial<Record<
+    "completions" | "hits" | "misses" | "evictions" | "refusals" | "failures" | "failuresKeep" |
+    "failuresRestore" | "failuresPeerForget" | "invalidations" | "placementsBlocked" | "placementBlocks",
+    number
+  >>;
+  /**
+   * Window p95 from summed histogram bucket counts. `value` is null with `open: true` when the
+   * percentile falls in the +Inf bucket (the figure is then only bounded below).
+   */
+  ttftP95?: { value: number | null; lowerBound?: number; upperBound?: number | null; open?: boolean; exact: false };
+  latencyP95?: { value: number | null; lowerBound?: number; upperBound?: number | null; open?: boolean; exact: false };
+}
+
+export interface MetricsHistoryCacheEndpoints {
+  port: number;
+  engineEpoch: string | null;
+  firstAvailableAt?: number;
+  points: MetricsHistoryCachePoint[];
+}
+
+export interface MetricsHistoryCacheEvent {
+  t: number;
+  until?: number;
+  port: number;
+  kind:
+    | "engine_restart"
+    | "counter_reset"
+    | "observation_backwards"
+    | "telemetry_lost"
+    | "telemetry_invalid"
+    | "histogram_edges_changed"
+    | "clock_skew"
+    | "collection_gap"
+    | "cache_pressure";
+  detail?: Record<string, unknown> | null;
+}
+
+export interface MetricsHistoryCache {
+  range: MetricsHistoryRange;
+  stepMs: number;
+  from: number;
+  to: number;
+  endpoints: MetricsHistoryCacheEndpoints[];
+  events: MetricsHistoryCacheEvent[];
+}
+
+export type MetricsHistoryResponse = MetricsHistoryData | { enabled: false };
 
 export interface SparksListResponse {
   sparks: SparkConfig[];
@@ -703,6 +1659,14 @@ export interface DecodeBenchConfig {
   maxTokens: number;
   /** Output-shape label only — not guided decoding / JSON schema. */
   promptType?: DecodeBenchPromptType;
+  /** Sampling temperature (default 0.7). Older runs have none: they ran at 0. */
+  temperature?: number;
+  /** Sent only for a detected TensorFold backend; absent means no top_k override. */
+  topK?: number;
+  /** Thinking on (default). Older runs have none: they ran with it off. */
+  thinking?: boolean;
+  /** Prompt tokens each stream carries before it decodes (deep-context start). Absent: empty context. */
+  contextTokens?: number;
   /** On-demand remote host (Tailscale HTTPS, etc.). */
   host?: string;
   tls?: boolean;
@@ -720,6 +1684,10 @@ export interface DecodeBenchStreamResult {
   completionTokens: number;
   prefillTps: number;
   prefillTokens: number;
+  /** Prompt tokens the server served from its prefix cache. */
+  cachedTokens?: number;
+  /** Deep-context runs: did this stream decode from the prefilled KV? */
+  contextCache?: "cached" | "partial" | "uncached" | "unknown";
   totalMs: number;
   error: string | null;
   /** Exact prompt used for this stream (debug). */
@@ -777,6 +1745,12 @@ export interface DecodeBenchLevelResult {
   totalCompletionTokens: number;
   durationMs: number;
   error: string | null;
+  /** Deep-context runs: the prefix cache did not serve every stream's context, so tok/s is not clean. */
+  warning?: string;
+  /** Deep-context runs: prompt tokens per stream and the time spent prefilling them before the wave. */
+  contextTokens?: number;
+  contextPrefillMs?: number;
+  contextCache?: { cached: number; partial: number; uncached: number; unknown: number };
   streams: DecodeBenchStreamResult[];
   model: string | null;
   /** ~1 Hz GPU/VRAM/power samples during the wave (debug). */
@@ -798,6 +1772,10 @@ export interface DecodeBenchProgress {
   completedLevels: number;
   totalLevels: number;
   message: string;
+  /** Generation tok/s measured from the streams of the running wave; null before the first token. */
+  liveTps?: number | null;
+  /** Deep-context runs: streams prefilled so far for the current level. */
+  prefill?: { done: number; total: number } | null;
 }
 
 export interface DecodeBenchJob {
@@ -820,6 +1798,10 @@ export interface DecodeBenchDefaults {
   maxMaxTokens: number;
   promptTypes: DecodeBenchPromptType[];
   defaultPromptType: DecodeBenchPromptType;
+  defaultTemperature?: number;
+  defaultThinking?: boolean;
+  minContextTokens?: number;
+  maxContextTokens?: number;
 }
 
 export interface DecodeBenchListResponse {
@@ -837,6 +1819,12 @@ export interface StartDecodeBenchRequest {
   modelId?: string | null;
   /** Output type: structured (default), prose, code, json. Prompt only. */
   promptType?: DecodeBenchPromptType;
+  /** 0–2, default 0.7. */
+  temperature?: number;
+  /** Default true. */
+  thinking?: boolean;
+  /** Prefill every stream with this many prompt tokens before the decode wave. 0 or omitted: start empty. */
+  contextTokens?: number;
   /** On-demand remote LLM host (hostname or URL). Skips this Spark's LAN/SSH path. */
   host?: string;
   tls?: boolean;
@@ -904,6 +1892,7 @@ export interface PrefillBenchDefaults {
   allowedContextSizes: number[];
   defaultContextSizes: number[];
   minContextSize?: number;
+  /** Ceiling when the model's context is unknown. */
   maxContextSize?: number;
 }
 
@@ -923,7 +1912,80 @@ export interface StartPrefillBenchRequest {
 }
 
 // ─── LLM quality benchmark ───────────────────────────────
-export type QualityCategory = "qa" | "reason" | "arith" | "track" | "gsm8k" | "mmlu" | "follow" | "long";
+export type QualityCategory = "qa" | "reason" | "arith" | "track" | "gsm8k" | "mmlu" | "mmlupro" | "math500" | "follow" | "long" | "tokenizer" | "fidelity" | "divergence";
+
+/** WP3: the divergence category's structural rates (no pass rate). */
+export interface QualityDivergenceSummary {
+  rows: number;
+  terminatedPct: number | null;
+  loops: number;
+  loopPct: number | null;
+  jsonValidPct: number | null;
+  jsonSchemaPct: number | null;
+  toolOkPct: number | null;
+  meanChars: number | null;
+  meanTokens: number | null;
+}
+
+/** WP2: the fidelity category's token-weighted corpus statistics (no pass rate). */
+export interface QualityFidelitySummary {
+  docs: number;
+  tokens: number;
+  bytes: number;
+  sumNll: number;
+  k: number;
+  nll?: number;
+  ppl?: number;
+  bitsPerByte?: number | null;
+}
+
+/** WP2: what a run's fidelity category scored against. */
+export interface QualityFidelityInfo {
+  corpusVersion: number | null;
+  corpusSha256: string | null;
+  k: number;
+  docs: number;
+  /** True once the per-position side file was written (needed for a fidelity comparison). */
+  sideFile?: boolean;
+}
+
+export interface QualityFidelityCompareDoc {
+  id: string;
+  tokens: number;
+  match: boolean;
+  nllA?: number;
+  nllB?: number;
+  dNll?: number;
+  top1AgreementPct?: number | null;
+  tailLossPct?: number | null;
+  divergence?: number | null;
+  scoredTop?: number;
+}
+
+/** WP2: `GET …/quality-bench/:benchId/fidelity-compare?with=<ref>` — A is the test run, B the reference. */
+export interface QualityFidelityCompare {
+  a: string;
+  b: string;
+  comparable: boolean;
+  reason: string | null;
+  k?: { a: number | null; b: number | null };
+  tokens?: number;
+  matchedDocs?: number;
+  mismatchedDocs?: number;
+  nllA?: number;
+  nllB?: number;
+  pplA?: number;
+  pplB?: number;
+  /** NLL(A) − NLL(B) per token, positive = the test run is worse; with a document-bootstrap 95 % CI. */
+  dNll?: number;
+  dNllCi?: [number, number];
+  top1AgreementPct?: number | null;
+  /** Share of positions where the reference's top-1 token is outside the test run's top-K. */
+  tailLossPct?: number | null;
+  /** Truncated-support divergence (ref ‖ test) over the shared top-K with an "other" bucket: a diagnostic, not a KL. */
+  divergence?: number | null;
+  docs?: QualityFidelityCompareDoc[];
+}
 
 export interface QualityBenchConfig {
   port: number;
@@ -939,8 +2001,63 @@ export interface QualityBenchConfig {
   concurrency: number;
   /** Free-text run label, e.g. "fp4 KV". */
   label: string;
+  /** WP0: the run repeats every category (and runs it serially when batched) to measure noise. */
+  noiseFloor?: boolean;
+  /** WP1: "default" | "full" carry a headline overall; "custom" is a partial run. Absent on old runs. */
+  profile?: "default" | "full" | "fidelity" | "custom";
   host?: string;
   tls?: boolean;
+}
+
+/** WP0: the served build, read from `/v1/models` (TensorFold's `tensorfold` object, vLLM's `/version`, …). */
+export interface QualityEngineRecord {
+  backend: string | null;
+  modelId: string | null;
+  ownedBy: string | null;
+  engineVersion: string | null;
+  gitCommit: string | null;
+  patches: string | null;
+  device: string | null;
+  checkpoint: string | null;
+  checkpointSha256: string | null;
+  quantization: Record<string, unknown> | null;
+  computeDtype: string | null;
+  kvCacheDtype: string | null;
+  tensorParallel: number | null;
+  contextLength: number | null;
+  speculative: { enabled?: boolean; kind?: string; name?: string } | null;
+  tokenizerSha256: string | null;
+  tokenizerName: string | null;
+  promptBos: boolean | null;
+  promptLogprobsCap: number | null;
+  reasoning: Record<string, unknown> | null;
+  params?: number | null;
+  fileSizeBytes?: number | null;
+}
+
+/** WP0: what the engine was measured to do (never inferred from its name). */
+export interface QualityEngineCapabilities {
+  promptLogprobs: boolean;
+  /** "openai-completions" (vLLM / TensorFold shape) when supported. */
+  shape: string | null;
+  reason: string | null;
+  probedAt: number;
+  positions?: number;
+  promptTokens?: number | null;
+  aligned?: boolean | null;
+  actualIncluded?: boolean;
+  promptTokenIds?: boolean;
+  exactMode?: string | null;
+  cap?: number;
+  capSource?: "advertised" | "probed";
+}
+
+export interface QualityEngineInfo {
+  record: QualityEngineRecord | null;
+  capabilities: QualityEngineCapabilities | null;
+  modelsReachable?: boolean;
+  error?: string;
+  probedAt: number;
 }
 
 export interface QualityItemResult {
@@ -958,6 +2075,42 @@ export interface QualityItemResult {
   error: string | null;
   /** Parsed answer, failing test line, or long-recall key counts. */
   detail: string | null;
+  /** Full visible reply (capped), kept on rows that need auditing: failed, truncated or disputed. Scoring v3. */
+  reply?: string;
+  /** The item's reference answer is wrong or ambiguous; the row is reported, never scored. Scoring v3. */
+  disputed?: boolean;
+  /** Reasoning tokens as the server counted them; null when it reports none. WP0. */
+  reasoningTokens?: number | null;
+  /** Length of the reasoning text the stream carried. WP0. */
+  reasoningChars?: number;
+  /** Reasoning tail (capped), kept on failed rows only. WP0. */
+  reasoning?: string;
+  /** Long-context items: the size the prompt was built for. WP0. */
+  size?: number;
+  /** Whether the item asked for thinking. WP1. */
+  thinking?: boolean;
+  /** Suite v2 grades: correct units (steps, people, keys) over the item's units. */
+  gradeCorrect?: number;
+  gradeTotal?: number;
+  /** WP3 divergence rows: structural checks on the stored reply. */
+  chars?: number;
+  terminated?: boolean;
+  loop?: { loop: boolean; cycle: number | null; tailShare: number };
+  json?: { valid: boolean; schema: boolean; fenced: boolean; missing: string[] };
+  tool?: { called: boolean; nameOk: boolean; argsOk: boolean; name: string | null; wrong: string[] };
+  toolCalls?: Array<{ name: string | null; arguments: string }>;
+  /** WP2 fidelity rows: the document and its token-weighted scores. */
+  docId?: string;
+  kind?: string;
+  lang?: string;
+  bytes?: number;
+  k?: number;
+  tokens?: number;
+  sumNll?: number;
+  nll?: number;
+  ppl?: number;
+  bitsPerByte?: number | null;
+  top1Pct?: number;
   longCorrect?: number;
   longTotal?: number;
   longStale?: number;
@@ -972,7 +2125,33 @@ export interface QualityCategorySummary {
   scored?: number;
   pct: number | null;
   errors: number;
+  /** Replies cut off by max_tokens before an answer: not scored (scoring v3; absent on older runs). */
+  truncated?: number;
+  /** Items with a disputed reference answer: not scored (scoring v3; absent on older runs). */
+  disputed?: number;
+  /** True when `truncated` > 0: pct covers only the replies that finished under this budget. */
+  budgetLimited?: boolean;
+  /** WP1: scored ÷ total, in percent. */
+  coveragePct?: number | null;
+  /** WP1: passed ÷ everything that ran (scored + truncated), in percent. */
+  budgetedPct?: number | null;
+  /** WP1: Wilson 95 % interval of pct / budgetedPct, in percent. */
+  ci?: [number, number] | null;
+  budgetedCi?: [number, number] | null;
+  /** WP1, long recall: keys found share and its prompt-clustered bootstrap interval. */
+  keysPct?: number;
+  keysCi?: [number, number] | null;
+  /** Suite v2 grades (arithmetic steps, tracked people): correct units over all units, with an item-clustered interval. */
+  gradeCorrect?: number;
+  gradeTotal?: number;
+  gradePct?: number;
+  gradeCi?: [number, number] | null;
+  /** WP2, fidelity only. */
+  fidelity?: QualityFidelitySummary;
+  /** WP3, divergence only. */
+  divergence?: QualityDivergenceSummary;
   meanCompletionTokens: number;
+  /** Every reply that hit max_tokens, whether or not it had answered by then. */
   hitMaxTokens: number;
   keysFound?: number;
   keysTotal?: number;
@@ -984,10 +2163,60 @@ export interface QualityBenchResults {
   items?: QualityItemResult[];
   itemCount?: number;
   categories: Partial<Record<QualityCategory, QualityCategorySummary>>;
-  /** Mean of the category percentages. */
+  /** Mean of the category percentages; null for a custom (partial) profile since WP1. */
   overallPct: number | null;
+  /** WP1: stratified bootstrap 95 % interval of the overall. */
+  overallCi?: [number, number] | null;
+  /** WP1: run hygiene warnings, e.g. a thinking-off category whose replies carried reasoning. */
+  warnings?: QualityRunWarning[];
+  /** WP2: corpus and K the fidelity category scored with. */
+  fidelity?: QualityFidelityInfo;
+  /** WP2: why the fidelity category was skipped on this engine. */
+  fidelityUnsupported?: string;
   /** Long sizes skipped because they exceed the model context. */
   skippedLongSizes: number[];
+  /** Noise-floor passes beyond the primary one (full runs only). WP0. */
+  passes?: QualityNoisePassRows[];
+  /** Noise floor: the extra passes paired with the primary pass. WP0. */
+  noise?: QualityNoiseSummary | null;
+  /** Measured prompt tokens per long size (the sizes are word-count estimates). WP0. */
+  longTokens?: Record<string, number>;
+}
+
+export interface QualityRunWarning {
+  kind: "thinkingNotHonoured";
+  category: QualityCategory;
+  rows: number;
+  reasoningRows: number;
+  truncated: number;
+}
+
+export interface QualityNoisePassRows {
+  index: number;
+  kind: "repeat" | "serial";
+  concurrency: number;
+  items: QualityItemResult[];
+}
+
+export interface QualityNoisePass {
+  index: number;
+  kind: "repeat" | "serial";
+  concurrency: number;
+  pairs: number;
+  discordant: number;
+  identical: number;
+  flipPct: number | null;
+  identicalPct: number | null;
+  categories: Partial<Record<QualityCategory, { pairs: number; discordant: number; identical: number; flipPct: number | null }>>;
+}
+
+export interface QualityNoiseSummary {
+  primaryConcurrency: number;
+  passes: QualityNoisePass[];
+  /** Largest flip rate between passes at identical settings. */
+  repeatFlipPct: number | null;
+  /** Largest flip rate between the batched primary pass and a concurrency-1 pass. */
+  batchFlipPct: number | null;
 }
 
 export interface QualityBenchProgress {
@@ -1008,8 +2237,56 @@ export interface QualityBenchJob {
   config: QualityBenchConfig;
   progress: QualityBenchProgress;
   results: QualityBenchResults;
+  /** WP0: engine record and measured capabilities; null until probed, absent on older runs. */
+  engine?: QualityEngineInfo | null;
+  /** WP4: the unit the run was made on (absent on older runs). */
+  unit?: { id: string; name: string } | null;
+  /** WP4: the cost side read from the probe and the last decode bench at start. */
+  cost?: QualityRunCost | null;
   error: string | null;
+  /** Working time: wall clock minus the time spent paused. */
   durationMs: number;
+  /** True while the run waits at the pause gate (status stays "running"); absent on older runs. */
+  paused?: boolean;
+  pausedAt?: number | null;
+  /** Time spent paused so far, the open pause included; a resumed run counts its downtime here. */
+  pausedMs?: number;
+  /** A finished run that can be relaunched from its saved rows (set on records, never on a running job). */
+  resumable?: boolean;
+  /** Times the run was relaunched from its rows, when last, and how many rows it took over. */
+  resumes?: number;
+  resumedAt?: number | null;
+  resumedFrom?: number | null;
+}
+
+/** WP4: what serving this model costs on the unit, read at run start; every field may be null. */
+export interface QualityRunCost {
+  /** Live per-stream decode tok/s from the probe at start. */
+  perStreamTps?: number | null;
+  /** Live aggregate generation tok/s from the probe at start. */
+  generationTps?: number | null;
+  /** Last decode benchmark on this port: single-stream tok/s and the best aggregate. */
+  decodeTps1?: number | null;
+  decodeTpsBest?: number | null;
+  decodeBenchAt?: number | null;
+  weightsGb?: number | null;
+  kvCacheGb?: number | null;
+  vramUsedGb?: number | null;
+  vramTotalGb?: number | null;
+}
+
+/** WP4: a pinned reference run for a model family (`qualityFamilyKey`). */
+export interface QualityReference {
+  sparkId: string;
+  benchId: string;
+  modelId: string | null;
+  pinnedAt: number;
+}
+
+/** WP4: `GET /api/quality-bench/runs` — every unit's saved runs (summaries) and the pinned references. */
+export interface QualityFleetResponse {
+  runs: QualityBenchJob[];
+  references: Record<string, QualityReference>;
 }
 
 export interface QualityBenchDefaults {
@@ -1038,6 +2315,7 @@ export interface StartQualityBenchRequest {
   longItems?: number;
   concurrency?: number;
   label?: string;
+  noiseFloor?: boolean;
   modelId?: string | null;
   host?: string;
   tls?: boolean;
@@ -1289,6 +2567,27 @@ export interface LauncherJobRead {
   truncated: boolean;
 }
 
+// ─── Model discovery ("Discover on this Spark") ───
+/** A model the discovery scan found on the dashboard's own Spark. */
+export type ModelCandidateKind = "scripted" | "ollama" | "huggingface";
+
+export interface ModelCandidate {
+  kind: ModelCandidateKind;
+  name: string;
+  /** Absolute folder (scripted) or cache dir (huggingface); ollama has none. */
+  directory?: string;
+  startScript?: string;
+  stopScript?: string | null;
+  /** Ollama weights only: human size string from `ollama list`. */
+  size?: string;
+}
+
+export interface ModelDiscoveryResponse {
+  candidates: ModelCandidate[];
+  scannedRoots: string[];
+  notes: string[];
+}
+
 // ─── Detailed fleet pages: history APIs ───
 /** One bucket of token traffic for one (Spark, port, model). `t` is a UTC date ("2026-10-07") or UTC hour ("2026-10-07T14"). */
 export interface TokenHistoryRow {
@@ -1300,6 +2599,17 @@ export interface TokenHistoryRow {
   completionTokens: number;
   /** Prompt tokens served from the prefix cache (always <= promptTokens). */
   cachedTokens: number;
+  /**
+   * Whether the backend measured the cache split for this bucket. `false` means the
+   * engine publishes no prefix-cache counter, so `cachedTokens` is not a miss count.
+   * Absent on data recorded before the flag existed (treated as reported).
+   */
+  cacheReported?: boolean;
+  /**
+   * Prompt tokens credited while the engine published no cached-prompt counter: neither
+   * cached nor computed. Absent on older data (then `cacheReported: false` means all of it).
+   */
+  unreportedPromptTokens?: number;
 }
 
 export interface TokenHistory {
@@ -1319,8 +2629,38 @@ export interface EnergyHistoryRow {
   avgWatts: number | null;
   fleetEnergyWh: number;
   fleetCoverageMs: number;
+  /**
+   * The series the charts draw: energy summed over the nodes reporting in each minute, so an
+   * hour with one unit asleep still has a value. Older records fall back to the full-fleet
+   * figures above.
+   */
+  avgReportingWatts?: number | null;
+  reportingEnergyWh?: number;
+  reportingCoverageMs?: number;
+  /** Fewest nodes the reporting series covered in this hour (null = no reporting data). */
+  reportingNodeCount?: number | null;
   outputTokens: number;
   coveredOutputTokens: number;
+  // ── Optional, present only in hours that have them ──
+  /** GPU board draw as measured, per node. */
+  nodeGpuWh?: Record<string, number>;
+  /** CPU draw as modelled from utilization, per node. */
+  nodeCpuWh?: Record<string, number>;
+  nodePartsCoverageMs?: Record<string, number>;
+  /** Wall energy a meter measured, per node. */
+  nodeWallWh?: Record<string, number>;
+  nodeWallCoverageMs?: Record<string, number>;
+  /** Part of the measured coverage the meter's own record confirmed. */
+  nodeWallMeteredMs?: Record<string, number>;
+  /** Wall energy filled from the estimate where no meter measured. */
+  nodeWallFilledWh?: Record<string, number>;
+  nodeWallFilledMs?: Record<string, number>;
+  /** Fleet wall figures, measured plus filled, while every node was covered. */
+  avgWallWatts?: number | null;
+  fleetWallWh?: number;
+  fleetWallFilledWh?: number;
+  fleetWallCoverageMs?: number;
+  wallCoveredOutputTokens?: number;
 }
 
 export interface EnergyHistory {
@@ -1329,7 +2669,65 @@ export interface EnergyHistory {
   generatedAt: number;
   retentionMs: number;
   nodeIds: string[];
+  /** Present only while power meters are configured. */
+  wallNodeIds?: string[];
+  wallRatios?: Record<string, number | null>;
   hourly: EnergyHistoryRow[];
+}
+
+/** One UTC month of the permanent energy roll-up. */
+export interface MonthlyEnergyMonth {
+  /** "YYYY-MM" (UTC). */
+  month: string;
+  startMs: number;
+  /** Exclusive end of the month. */
+  endMs: number;
+  /** False while the month is still the current one. */
+  closed: boolean;
+  /** Nodes that reported in this month (the scope at the time). */
+  nodeIds: string[];
+  nodes: Record<string, MonthlyEnergyNode>;
+  totalWh: number;
+  fleetWh: number;
+  fleetCoverageMs: number;
+  outputTokens: number;
+  coveredOutputTokens: number;
+  whPerOutputToken: number | null;
+  /** From this instant on, every node's energy is also kept per hour (hourWh). Absent for months from before hourly records. */
+  binnedFromMs?: number;
+  // ── Present only in months with wall power (measured or filled) ──
+  totalWallWh?: number;
+  totalWallFilledWh?: number;
+  fleetWallWh?: number;
+  fleetWallFilledWh?: number;
+  fleetWallCoverageMs?: number;
+  wallCoveredOutputTokens?: number;
+  wallWhPerOutputToken?: number | null;
+}
+
+export interface MonthlyEnergyNode {
+  wh: number;
+  coverageMs: number;
+  gpuWh?: number;
+  cpuWh?: number;
+  partsCoverageMs?: number;
+  wallWh?: number;
+  wallCoverageMs?: number;
+  wallMeteredMs?: number;
+  wallFilledWh?: number;
+  wallFilledMs?: number;
+  /** Wh per UTC hour of the month, index 0 = its first hour; trailing empty hours left out. */
+  hourWh?: number[];
+  /** The same for wall power, filled time included. */
+  wallHourWh?: number[];
+}
+
+export interface MonthlyEnergy {
+  estimated: boolean;
+  generatedAt: number;
+  foldedThroughMs: number;
+  /** Oldest first. */
+  months: MonthlyEnergyMonth[];
 }
 
 export interface ActivityEventsPage {
@@ -1550,4 +2948,377 @@ export class ToolEvalApiError extends Error {
     this.errors = errors;
     this.active = active;
   }
+}
+
+// ─── Storage Manager ─────────────────────────────────────
+/** Run a storage action as an administrator. The password is used for this call only. */
+export interface StorageElevation {
+  sudo?: boolean;
+  sudoPassword?: string;
+  /** Keep a typed password on the dashboard server (encrypted) once sudo has accepted it. */
+  remember?: boolean;
+}
+
+export interface StorageFilesystem {
+  source: string;
+  fstype: string;
+  mount: string;
+  totalBytes: number;
+  usedBytes: number;
+  availBytes: number;
+}
+
+/** The folders directly inside one folder, for the folder picker. */
+export interface StorageFolders {
+  path: string;
+  dirs: string[];
+  /** The list was cut: the folder holds more folders than are shown. */
+  more: boolean;
+}
+
+export interface StorageStatus {
+  user: string | null;
+  /** The dashboard remembers this account's sudo password (encrypted), so none needs typing. */
+  sudoSaved?: boolean;
+  /** "root" runs directly, "yes" = passwordless sudo works, "no" = a password is needed. */
+  sudo: "root" | "yes" | "no";
+  filesystems: StorageFilesystem[];
+  docker: { state: "ok" | "missing" | "denied" | "down"; rootDir: string | null };
+  /** The home folder of the account the dashboard uses on this Spark. */
+  homeDir?: string | null;
+  /** Home folders of ordinary people under /home (used when the account itself is root). */
+  peopleHomes?: string[];
+  /** The server accepts a typed sudo password on this connection (https or the machine itself). */
+  passwordAllowed?: boolean;
+  /** Settings allows typing it over plain http, so the page's secure-context check is skipped. */
+  plainPasswordAllowed?: boolean;
+  /** The owner allowed deleting folders as administrator on this Spark for this account, or null. */
+  elevatedDeleteAck?: StorageElevatedDeleteAck | null;
+}
+
+/** The owner's acknowledgement that processes of the Spark's account are treated as having root access. */
+export interface StorageElevatedDeleteAck {
+  /** The account name the page showed when it was confirmed. */
+  user: string | null;
+  acknowledgedAt: number;
+}
+
+/**
+ * A delete that was staged on the Spark and never finished ("Needs attention"). `staged`: the item waits in
+ * the staging folder. `interrupted`: its delete stopped part way. `conflict`: it could not be put back because
+ * its name was taken. `in-place`: it never moved. `gone`: neither it nor the staged copy is there any more.
+ * `unknown` / `unreadable`: something else is in the way; check by hand.
+ */
+export interface StorageQuarantineItem {
+  id: string;
+  state: "staged" | "interrupted" | "conflict" | "in-place" | "gone" | "unknown" | "unreadable";
+  elevated: boolean;
+  type: StorageEntryType;
+  createdAt: number | null;
+  /** Where it was. */
+  path: string;
+  /** Where it waits now. */
+  stagedPath: string;
+  reason: string | null;
+}
+
+/** One item of a bulk delete that was tried and not deleted. */
+export interface StorageBulkDeleteFailure {
+  path: string;
+  /** The single delete's error code (`permission`, `not-found`, `protected-descendant`, `unreachable`, …). */
+  code: string;
+  message: string;
+  /** Part of it may already be gone. */
+  partial: boolean;
+  /** Kept on the Spark under "Needs attention". */
+  quarantineId?: string;
+  /** As administrator: the command to run on the Spark by hand. */
+  command?: string;
+}
+
+/**
+ * A bulk delete (POST …/storage/delete-many): its items run one after another on the server under one busy lock,
+ * each as a full single delete. `done` items of `total` have been tried; `current` is the one being deleted.
+ * `covered` paths were inside another listed folder (deleted with it, not run on their own). `stopped`: why the
+ * run ended early (`bad-password`, `password-locked`, `no-ack`, `unreachable`, `unit-busy`, `no-sudo`, `time-limit`, …),
+ * with the rest in `skipped`.
+ */
+export interface StorageBulkDeleteJob {
+  id: string;
+  state: "running" | "done";
+  elevated: boolean;
+  total: number;
+  done: number;
+  current: string | null;
+  startedAt: number;
+  finishedAt: number | null;
+  /** Finished, and every item was deleted. */
+  success: boolean;
+  deleted: string[];
+  failed: StorageBulkDeleteFailure[];
+  skipped: { path: string; reason: string }[];
+  covered: string[];
+  stopped: { code: string; message: string } | null;
+}
+
+/**
+ * The delete advisor (POST …/storage/advise): how careful to be before deleting, from evidence only. "low": nothing
+ * found and everything checked. "review": something worth a look, or not everything could be checked. "high": in use
+ * now, work that exists only here (git), or what looks like credentials.
+ */
+export type StorageAdviceLevel = "low" | "review" | "high";
+
+/** One thing the advisor saw. "note": context that never changes the level (a date, a copy elsewhere, a known place). */
+export interface StorageAdviceReason {
+  rule: string;
+  level: StorageAdviceLevel | "note";
+  text: string;
+}
+
+export interface StorageAdviceItem {
+  path: string;
+  level: StorageAdviceLevel;
+  /** Every check ran in full. False: see `unchecked`; the level is then at least "review". */
+  complete: boolean;
+  /** Highest first, notes last. */
+  reasons: StorageAdviceReason[];
+  /** What could not be checked, and why. */
+  unchecked: { rule: string; text: string }[];
+}
+
+export interface StorageAdvice {
+  /** Server time of the check. */
+  checkedAt: number;
+  /** Changes within this many minutes counted as recent. */
+  recentMinutes: number;
+  /** The highest item level. */
+  level: StorageAdviceLevel;
+  complete: boolean;
+  /** The paths checked, in the order sent (without those inside another listed folder). */
+  items: StorageAdviceItem[];
+  /** Paths inside another listed folder: checked as part of it. */
+  covered: string[];
+}
+
+/** How dealing with a Needs-attention item ended: put back, deleted, or only its record dropped. */
+export interface StorageQuarantineResult {
+  success: boolean;
+  id: string;
+  outcome: "restored" | "deleted" | "in-place" | "gone" | "forgotten" | null;
+}
+
+/** How the dashboard reaches a Spark (roadmap §4), what the probe found there, and what that allows. */
+export interface StorageContext {
+  /** "ssh": over SSH as that account. "native-local": the dashboard runs on the Spark itself. "container-local": from the dashboard's container through the host's mount namespace. */
+  kind: "ssh" | "native-local" | "container-local";
+  transport: "ssh" | "nsenter" | "local";
+  uid: number | null;
+  account: string | null;
+  /** $HOME as the programs see it, and the account's home from the user database. */
+  home: string | null;
+  accountHome: string | null;
+  hostname: string | null;
+  bootId: string | null;
+  /** Shares the host's PID namespace: true, false, or null when that could not be read. */
+  hostPidNs: boolean | null;
+  inContainer: boolean;
+  sudo: "root" | "yes" | "no";
+  linger: "yes" | "no" | "unknown";
+  capabilities: string[];
+  probedAt: number;
+  /** Each feature's verdict: offered, or not with the reason. */
+  features: Record<string, { supported: boolean; reason: string | null }>;
+}
+
+export type StorageEntryType = "dir" | "file" | "link" | "other";
+
+export interface StorageEntry {
+  path: string;
+  bytes: number;
+  type: StorageEntryType;
+  /** Children were scanned: anything not listed is part of the folder's "smaller items". */
+  expanded: boolean;
+  /** Why this cannot be deleted from the dashboard, or null when it can. */
+  locked: string | null;
+  /** The name has bytes that cannot be sent back to the unit. */
+  unsafe?: true;
+  /**
+   * Part of `bytes` held by files that also have hard links outside this entry: deleting it does not free
+   * them. `bytes` counts every file once, like `du -s` of this entry alone.
+   */
+  sharedBytes?: number;
+  /**
+   * The newest modification time of anything in it (a file's or link's own), in whole seconds since 1970 by
+   * the Spark's clock. Left out when not known: the basic scan, analyses from before dates were recorded,
+   * a scan stopped early, or nothing readable.
+   */
+  modifiedAt?: number;
+}
+
+/** Remove agent junk: where an item came from, as the dashboard groups it. */
+export type AgentJunkGroup = "worktrees" | "temp" | "sessions" | "editors" | "scratch" | "caches";
+/** The smart guess: junk (ticked by Smart pick), likely, review (check first) or keep. */
+export type AgentJunkVerdict = "junk" | "likely" | "review" | "keep";
+
+export interface AgentJunkSignal {
+  /** age, recent, age-unknown, untracked, no-git, home-root, uncommitted, memory, tests-folder, worktree-session, current-version, size-partial */
+  code: string;
+  days?: number;
+}
+
+export interface AgentJunkItem {
+  path: string;
+  name: string;
+  type: "d" | "f";
+  /** Null when it could not be measured in time. */
+  bytes: number | null;
+  /** Newest change of anything in it, seconds since 1970 by the unit's clock; null when not known. */
+  modifiedAt: number | null;
+  rule: string;
+  group: AgentJunkGroup;
+  agent: string;
+  verdict: AgentJunkVerdict;
+  score: number;
+  signals: AgentJunkSignal[];
+}
+
+export interface AgentJunkResult {
+  checkedAt: number;
+  home: string | null;
+  git: "ok" | "missing";
+  /** Every home folder was looked through in time and nothing was left out. */
+  complete: boolean;
+  more: boolean;
+  items: AgentJunkItem[];
+}
+
+export interface StorageScanRequest extends StorageElevation {
+  path?: string;
+  depth?: number;
+  /** "new" replaces the result on the page; "drill" rescans one folder and swaps it in. */
+  mode?: "new" | "drill";
+}
+
+/**
+ * What a stop request achieved: "pending" (asked), "terminated" (stopped, nothing left running),
+ * "already-gone" (it had ended), or "not-terminated" / "unknown" (could not be confirmed: the Spark stays busy).
+ */
+export type StorageStopOutcome = "pending" | "terminated" | "already-gone" | "not-terminated" | "unknown";
+
+export interface StorageScanJob {
+  id: string;
+  /** "stopping": a stop was asked for and is not confirmed yet. */
+  state: "running" | "stopping" | "done" | "error" | "cancelled";
+  path: string;
+  depth: number;
+  mode: "new" | "drill";
+  elevated: boolean;
+  startedAt: number;
+  finishedAt: number | null;
+  error: { code: string; message: string } | null;
+  /** "Stop scan" is offered. False for a scan run through sudo: the dashboard's account cannot stop it. */
+  cancellable?: boolean;
+  /** Stopping is best effort here (the dashboard runs in a container that may not see the Spark's processes). */
+  cancelBestEffort?: boolean;
+  /** Server time by which the Spark ends the scan by itself (scans run through sudo), else null. */
+  stopsByItselfAt?: number | null;
+  stop?: { requestedAt: number; outcome: StorageStopOutcome; message: string | null } | null;
+  /** The Spark stays busy for this job: other storage work is refused until its processes are known to be gone. */
+  holdsSpark?: boolean;
+  holdReason?: "running" | "stopping" | "unconfirmed" | "unreachable" | null;
+  /** Server time by which the hold ends by itself at the latest, when known. */
+  holdUntil?: number | null;
+}
+
+export interface StorageSession {
+  root: string;
+  scannedAt: number;
+  /** When the analysis was made. Looking inside a folder later refreshes that folder only. */
+  analysedAt?: number;
+  elevated: boolean;
+  /** Folders the scan was not allowed to read. */
+  unreadable: number;
+  /** The unit stopped the scan before it finished, so sizes are incomplete. */
+  timedOut: boolean;
+  /** "exact": every file counted once, shared sizes known. "approx": hard-linked files may be counted in several folders. */
+  hardlinks?: "exact" | "approx";
+  /** The scan that made this analysis recorded modification times (the basic scan and older analyses did not). */
+  dated?: boolean;
+  entries: StorageEntry[];
+}
+
+export interface StorageScanSnapshot {
+  job: StorageScanJob | null;
+  revision: number;
+  /** Null when `since` already matches. */
+  session: StorageSession | null;
+  /** Server clock, to time a running scan without trusting this browser's clock. */
+  now?: number;
+}
+
+export interface DockerUsageRow {
+  count: number | null;
+  active: number | null;
+  sizeBytes: number | null;
+  reclaimableBytes: number | null;
+}
+
+export interface DockerImage {
+  id: string;
+  tags: string[];
+  sizeBytes: number | null;
+  created: string | null;
+  usedBy: { name: string; state: string }[];
+  /** "unused" images are the ones that can be removed. */
+  /** "unknown": the Spark could not list its containers, so nobody can say whether one uses it (never removable). */
+  status: "running" | "stopped" | "unused" | "unknown";
+  /**
+   * A registry digest is recorded (pulled from, or pushed to, a registry). false: none, so it was built or
+   * loaded on this Spark and may be the only copy. null or missing: not reported.
+   */
+  registryDigest?: boolean | null;
+}
+
+export interface DockerContainer {
+  id: string;
+  name: string;
+  /** Docker's state word: running, exited, created, paused, dead… */
+  state: string;
+  /** The image it was made from. */
+  imageId: string;
+  created: string | null;
+  /** Not running, so it can be removed. */
+  removable: boolean;
+  /** When it last stopped, as Docker reported it. Missing when it never ran or the Spark did not say. */
+  finishedAt?: string | null;
+}
+
+export interface DockerStorage {
+  rootDir: string | null;
+  usage: Partial<Record<"images" | "containers" | "volumes" | "buildCache", DockerUsageRow>>;
+  images: DockerImage[];
+  /** Stopped containers first. */
+  containers: DockerContainer[];
+  /** What the Spark could list. Containers not "ok": no image counts as unused. */
+  listing?: { images: "ok" | "partial" | "failed"; containers: "ok" | "failed" };
+}
+
+/** The outcome of removing images or containers: IDs removed, skipped (in use, gone…) and failed. */
+export interface DockerRemoveResult {
+  success: boolean;
+  removed: string[];
+  skipped: { id: string; reason: string }[];
+  failed: { id: string; message: string }[];
+}
+
+/**
+ * Clearing Docker's unused build cache last used more than `olderThanDays` ago, on the builder built into the
+ * daemon. `adapter`: "buildx" (pinned to the Docker context's own builder) or "daemon" (no buildx).
+ * `reclaimedBytes`: what Docker says it reclaimed, null when it did not say.
+ */
+export interface DockerBuilderPruneResult {
+  success: boolean;
+  olderThanDays: number;
+  adapter: "buildx" | "daemon" | null;
+  reclaimedBytes: number | null;
 }

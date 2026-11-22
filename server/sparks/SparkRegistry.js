@@ -15,6 +15,24 @@ import { llmProbeHost } from "../collectors/llmHost.js";
  *  - Held in memory for SSH collectors / LLM probes
  *  - Encrypted at rest in config/sparks-secrets.json (survives Docker restart)
  */
+/**
+ * Normalize the optional Mac agent endpoint. `null` (or a block with nothing
+ * usable in it) keeps the SSH transport for a mac unit.
+ * @param {unknown} value
+ */
+export function normalizeMacAgent(value) {
+  if (!value || typeof value !== "object") return null;
+  const row = /** @type {Record<string, unknown>} */ (value);
+  const url = String(row.url || "").trim();
+  const host = String(row.host || "").trim();
+  const port = Number.parseInt(String(row.port ?? ""), 10);
+  const usablePort = Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
+  if (!url && !host && !usablePort) return null;
+  const controlPort = Number(row.controlPort);
+  return { url: url || null, host: host || null, port: usablePort,
+    ...(Number.isInteger(controlPort) && controlPort > 0 && controlPort <= 65535 ? { controlPort } : {}) };
+}
+
 export class SparkRegistry {
   constructor() {
     this._sparks = [];
@@ -609,8 +627,9 @@ export class SparkRegistry {
     return {
       id: config.id,
       name: config.name || config.id,
-      /** Unit type: spark (DGX Spark), host (dedicated GPU Linux box), or mac (Apple Silicon). */
-      kind: config.kind === "host" ? "host" : config.kind === "mac" ? "mac" : "spark",
+      /** Unit type: spark (DGX Spark) or host (dedicated GPU Linux box). */
+      kind: config.kind === "mac" ? "mac" : config.kind === "host" || config.platform === "windows" ? "host" : "spark",
+      agent: config.kind === "mac" ? normalizeMacAgent(config.agent) : null,
       /**
        * Optional OS platform override for SSH-collected units: "darwin" for
        * macOS hosts (Mac Studio etc.). Absent/"linux" keeps the existing
@@ -618,14 +637,20 @@ export class SparkRegistry {
        * See SystemCollector isMac.
        */
       platform:
-        config.platform === "darwin" || config.kind === "mac" ? "darwin" : "linux",
+        config.kind === "mac" || config.platform === "darwin" ? "darwin" : config.platform === "windows" ? "windows" : "linux",
       lanIp: config.lanIp || "",
+      /** Optional pinned HTTP target for LLM probes/actions; SSH still uses ssh.host. */
+      llmHost:
+        typeof config.llmHost === "string" && config.llmHost.trim()
+          ? config.llmHost.trim()
+          : null,
       cx7Ip: config.cx7Ip || null,
       /** Optional user override for Wake-on-LAN. Empty → use detectedMacAddress. */
       macAddress: config.macAddress || null,
       /** Last MAC seen on enP7s7 (auto; not set via public PATCH). */
       detectedMacAddress: config.detectedMacAddress || null,
-      isLocal: Boolean(config.isLocal),
+      // A Windows PC is always reached over SSH (the local collectors read /proc).
+      isLocal: config.kind !== "mac" && config.platform !== "windows" && Boolean(config.isLocal),
       ssh,
       llmPorts,
       role,
@@ -652,12 +677,24 @@ export class SparkRegistry {
       /**
        * Opt-in tailnet presence via `tailscale status --json` (default false).
        */
-      tailscaleMonitoring: Boolean(config.tailscaleMonitoring),
+      // Hermes and Tailnet probes are bash scripts; Windows units do not run them.
+      tailscaleMonitoring: config.platform !== "windows" && Boolean(config.tailscaleMonitoring),
       /**
        * Opt-in: Hermes Agent CLI is installed on this machine. When enabled,
        * the SparkMonitor checks for updates and allows one-click `hermes update`.
        */
-      hermesMonitoring: Boolean(config.hermesMonitoring),
+      hermesMonitoring: config.platform !== "windows" && Boolean(config.hermesMonitoring),
+      /**
+       * Opt-in display-carveout card (default false): what spark-attic does
+       * with a GB10's display carveout and how much of it is lent. The
+       * carveout is a DGX Spark one, so Linux Sparks only.
+       */
+      atticMonitoring:
+        config.kind !== "host" &&
+        config.kind !== "mac" &&
+        config.platform !== "windows" &&
+        config.platform !== "darwin" &&
+        Boolean(config.atticMonitoring),
       disabledDevices: Array.isArray(config.disabledDevices) ? config.disabledDevices : [],
       disabledInterfaces: Array.isArray(config.disabledInterfaces) ? config.disabledInterfaces : [],
       storagePollDisabled: Boolean(config.storagePollDisabled),

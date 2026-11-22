@@ -1,15 +1,17 @@
 import { useEffect, useRef, useState } from "react";
 import { TrendLine } from "../../ui/TrendLine";
+import { useTranslation } from "react-i18next";
 
 const SAMPLE_MS = 1000;
 const MAX_SAMPLES = 90;
 
 /**
- * Live generation tok/s while a decode run is in flight: the engine's own throughput
- * (as the monitor reads it), sampled once a second so the line moves smoothly between
- * polls. Renders nothing for a Remote target, where there is no live reading.
+ * Live generation tok/s while a decode run is in flight: the rate measured from the run's
+ * own streams, else the engine's throughput as the monitor reads it, sampled once a second
+ * so the line moves smoothly between polls. Renders nothing when neither exists.
  */
 export function LiveTps({ tps, active }: { tps: number | null | undefined; active: boolean }) {
+  const { t } = useTranslation("benchmarks");
   const [samples, setSamples] = useState<number[]>([]);
   const latest = useRef<number | null>(tps ?? null);
   latest.current = tps ?? null;
@@ -28,12 +30,12 @@ export function LiveTps({ tps, active }: { tps: number | null | undefined; activ
   if (!active || tps == null) return null;
   const peak = samples.length ? Math.max(...samples) : tps;
   return (
-    <div className="bench-live" aria-label="Live generation speed">
+    <div className="bench-live" aria-label={t("liveTps.aria")}>
       <div className="bench-live__head">
         <span className="bench-live__label">
-          <span className="bench-live__dot" aria-hidden /> Live generation
+          <span className="bench-live__dot" aria-hidden /> {t("liveTps.live")}
         </span>
-        <span className="bench-live__peak">peak {peak.toFixed(1)} tok/s</span>
+        <span className="bench-live__peak">{t("liveTps.peak", { value: peak.toFixed(1) })}</span>
       </div>
       <div className="bench-live__value">
         {tps.toFixed(1)} <small>tok/s</small>

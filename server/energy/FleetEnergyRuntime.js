@@ -1,3 +1,5 @@
+import { monthRange } from "./FleetEnergyMonthly.js";
+
 const MAX_POWER_TELEMETRY_AGE_MS = 10_000;
 const ENERGY_SAMPLE_INTERVAL_MS = 2_000;
 
@@ -8,20 +10,26 @@ function hasFreshTimestamp(timestamp, atMs) {
 }
 
 function isDefaultGpuResult(gpu) {
+  // A null usage/draw is an unread privileged field, not a measured zero.
   return (
-    gpu?.temperature === 0 &&
-    gpu?.usage === 0 &&
-    gpu?.power?.draw === 0 &&
-    gpu?.vram?.total === 0
+    gpu?.usage == null ||
+    gpu?.power?.draw == null ||
+    gpu?.vram?.total == null ||
+    ((gpu?.temperature === 0 || gpu?.temperature === null) &&
+      gpu?.usage === 0 &&
+      gpu?.power?.draw === 0 &&
+      gpu?.vram?.total === 0)
   );
 }
 
 function isDefaultCpuResult(cpu) {
   return (
-    cpu?.usage === 0 &&
-    cpu?.temperature === 0 &&
-    cpu?.draw === 0 &&
-    cpu?.tdp === 0
+    cpu?.usage == null ||
+    cpu?.draw == null ||
+    (cpu?.usage === 0 &&
+      (cpu?.temperature === 0 || cpu?.temperature === null) &&
+      cpu?.draw === 0 &&
+      cpu?.tdp === 0)
   );
 }
 
@@ -43,6 +51,9 @@ export function hasFreshPowerTelemetry(snapshot, monitor, atMs) {
     wasCollectionSuccessful(monitor, "cpu") &&
     hasFreshTimestamp(monitor?._lastUpdate?.gpu, atMs) &&
     hasFreshTimestamp(monitor?._lastUpdate?.cpu, atMs) &&
+    gpu?.metricAvailability?.powerDraw !== false &&
+    gpu?.metricAvailability?.usage !== false &&
+    cpu?.usageAvailable !== false &&
     (isMacUnit || !isDefaultGpuResult(gpu)) &&
     !isDefaultCpuResult(cpu) &&
     Number.isFinite(gpu?.power?.draw) &&
@@ -59,9 +70,17 @@ export function runFleetEnergySamplerTick({
   orderedSnapshots,
   monitors,
   now = Date.now,
+  wallReadings = null,
 }) {
   const atMs = now();
   const snapshots = orderedSnapshots();
+  // Latest fresh wall readings from external meters (cached; this never asks a meter).
+  let wall = null;
+  try {
+    wall = wallReadings?.(atMs) ?? null;
+  } catch {
+    wall = null;
+  }
   const trackerInputs = snapshots.map((snapshot) => ({
     ...snapshot,
     telemetryFresh: hasFreshPowerTelemetry(
@@ -69,6 +88,7 @@ export function runFleetEnergySamplerTick({
       monitors?.get?.(snapshot?.id),
       atMs
     ),
+    ...(wall ? { wallWatts: wall.get(snapshot?.id) ?? null } : {}),
   }));
   return tracker.record(trackerInputs, atMs);
 }
@@ -89,6 +109,32 @@ export function registerFleetEnergyRoute(app, tracker) {
       return res.status(400).json({ error: "olderThanMs must be a positive number" });
     }
     return res.json({ removed: tracker.clear({ olderThanMs }) });
+  });
+  // Remove every recorded wall-power figure (minutes and months); the estimate is kept. Meters
+  // that are still configured start recording again with a new boundary.
+  app.delete("/api/fleet-energy/wall", (req, res) => {
+    if (req.query?.confirm !== "delete-wall-power") {
+      return res.status(400).json({ error: "dropping recorded wall power needs confirm=delete-wall-power" });
+    }
+    return res.json(tracker.dropWall());
+  });
+  // Permanent monthly roll-up. Survives the resets above; clearing it is a separate, explicit call.
+  app.get("/api/fleet-energy/monthly", (_req, res) => res.json(tracker.monthlySnapshot()));
+  // Query: month=YYYY-MM (one month) or all=true&confirm=delete-all-history (everything). One is required.
+  app.delete("/api/fleet-energy/monthly", (req, res) => {
+    const { month, all, confirm } = req.query ?? {};
+    if (all === "true" && month == null) {
+      if (confirm !== "delete-all-history") {
+        return res
+          .status(400)
+          .json({ error: "deleting all permanent history needs confirm=delete-all-history" });
+      }
+      return res.json({ removed: tracker.clearMonthly({ all: true }) });
+    }
+    if (typeof month === "string" && monthRange(month) && all == null) {
+      return res.json({ removed: tracker.clearMonthly({ month }) });
+    }
+    return res.status(400).json({ error: "pass month=YYYY-MM, or all=true&confirm=delete-all-history" });
   });
   return app.get("/api/fleet-energy", createFleetEnergyHandler(tracker));
 }
@@ -116,6 +162,7 @@ export function createFleetEnergyRuntime({
   setIntervalFn = setInterval,
   clearIntervalFn = clearInterval,
   logError = console.error,
+  wallReadings = null,
 }) {
   let started = false;
   let stopped = false;
@@ -133,7 +180,7 @@ export function createFleetEnergyRuntime({
   const sample = () => {
     if (stopped) return;
     try {
-      runFleetEnergySamplerTick({ tracker, orderedSnapshots, monitors, now });
+      runFleetEnergySamplerTick({ tracker, orderedSnapshots, monitors, now, wallReadings });
     } catch (error) {
       reportError("fleet energy sample error", error);
     }

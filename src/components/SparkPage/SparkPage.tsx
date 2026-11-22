@@ -1,3 +1,4 @@
+import { useTranslation } from "react-i18next";
 import { useState, useEffect, useCallback, type CSSProperties, type ReactNode } from "react";
 import type { SparkSnapshot } from "../../api/types";
 import { isLlmMonitoringEnabled } from "../../api/sparkRole";
@@ -11,12 +12,16 @@ import { RamPanel } from "./RamPanel";
 import { StoragePanel } from "./StoragePanel";
 import { NetworkPanel } from "./NetworkPanel";
 import { TailscalePanel } from "./TailscalePanel";
+import { AtticPanel } from "./AtticPanel";
 import { LlmPanel } from "./LlmPanel";
 import { ComfyPanel } from "./ComfyPanel";
+import { RuntimesPanel } from "../ui/RuntimeChips";
 import { LlmModelsPanel } from "./LlmModelsPanel";
+import { RocePanel } from "./RocePanel";
 import { UnifiedMemoryPanel } from "./UnifiedMemoryPanel";
+import { HistoryPanel } from "./HistoryPanel";
 import "../../styles/spark.css";
-import { vramContextFor } from "../../shared/vramBreakdown";
+import { memoryModelFor, vramContextFor } from "../../shared/vramBreakdown";
 
 interface SparkPageProps {
   spark: SparkSnapshot;
@@ -27,7 +32,12 @@ interface SparkPageProps {
   benchShareImage?: boolean;
   /** GPU panel VRAM bar split by engine / system / free (Settings, on by default). */
   showVramBreakdown?: boolean;
+  /** 48 h / 30 d History panel under the columns (Settings → Metrics history, off by default). */
+  metricsHistory?: boolean;
   onEdit?: () => void;
+  /** Navigate to a spark id (header back-to-overview link). */
+  onNavigate?: (sparkId: string) => void;
+  onAddHarness?: () => void;
 }
 
 type SparkView = "all" | "resources" | "services";
@@ -47,8 +57,12 @@ export function SparkPage({
   temperatureUnit,
   benchShareImage = false,
   showVramBreakdown = true,
+  metricsHistory = false,
   onEdit,
+  onNavigate,
+  onAddHarness,
 }: SparkPageProps) {
+  const { t } = useTranslation("hardware");
   const { metrics } = spark;
   const [disabledDevices, setDisabledDevices] = useState<string[]>(spark.disabledDevices || []);
   const [disabledInterfaces, setDisabledInterfaces] = useState<string[]>(
@@ -60,6 +74,7 @@ export function SparkPage({
   );
   const [showAddPort, setShowAddPort] = useState(false);
   const [newPortDraft, setNewPortDraft] = useState("");
+
   // Sync when spark data changes (WS push)
   useEffect(() => {
     setDisabledDevices(spark.disabledDevices || []);
@@ -96,23 +111,26 @@ export function SparkPage({
     [spark.id]
   );
 
-  const handleAddPort = useCallback(async () => {
-    const port = parseInt(newPortDraft, 10);
-    if (!Number.isInteger(port) || port < 1 || port > 65535) return;
-    if (llmPorts.includes(port)) {
-      setNewPortDraft("");
-      setShowAddPort(false);
-      return;
-    }
-    try {
-      const result = await addLlmPort(spark.id, port);
-      setLlmPorts(result.llmPorts);
-      setNewPortDraft("");
-      setShowAddPort(false);
-    } catch (err) {
-      console.error("Failed to add LLM port:", err);
-    }
-  }, [spark.id, newPortDraft, llmPorts]);
+  const handleAddPort = useCallback(
+    async (portOverride?: number) => {
+      const port = portOverride ?? parseInt(newPortDraft, 10);
+      if (!Number.isInteger(port) || port < 1 || port > 65535) return;
+      if (llmPorts.includes(port)) {
+        setNewPortDraft("");
+        setShowAddPort(false);
+        return;
+      }
+      try {
+        const result = await addLlmPort(spark.id, port);
+        setLlmPorts(result.llmPorts);
+        setNewPortDraft("");
+        setShowAddPort(false);
+      } catch (err) {
+        console.error("Failed to add LLM port:", err);
+      }
+    },
+    [spark.id, newPortDraft, llmPorts]
+  );
 
   const handleRemovePort = useCallback(async (port: number) => {
     try {
@@ -126,20 +144,27 @@ export function SparkPage({
   const llmOn = isLlmMonitoringEnabled(spark);
   const comfyOn = Boolean(spark.comfyMonitoring);
   const tailscaleOn = Boolean(spark.tailscaleMonitoring);
+  const atticOn = Boolean(spark.atticMonitoring);
   const showServices = llmOn || comfyOn;
   // Everything on one page: hardware and services together (no sub-tabs).
   const view: SparkView = showServices ? "all" : "resources";
   const showSvc = showServices && view !== "resources";
-  // Models you start/stop with your own start.sh / stop.sh. Shown on every Spark and in every tab,
-  // so it is always easy to find (a worker may have its own scripts too).
+  // Agent Macs use verified runtime profiles; other units retain script launchers.
   const modelsPanel = <LlmModelsPanel spark={spark} />;
+  const profileModels = spark.kind === "mac" && spark.macTransport === "agent";
   const primaryPort = llmPorts[0];
   const extraPorts = llmPorts.slice(1);
   const unified = metrics.unifiedMemory;
-  const showUnified = spark.kind !== "host" && unified != null && unified.total > 0;
+  // A Mac host shares one pool like a Spark (memoryModelFor), so it gets the unified panel too.
+  const showUnified = memoryModelFor(spark.kind, spark.platform) === "unified" && unified != null && unified.total > 0;
 
   const renderLlmPanel = (port: number, portIndex: number, className?: string) => {
-    const llmMetrics = metrics.llm?.[portIndex] ?? null;
+    // Match by the snapshot's own port so a panel never shows another port's
+    // backend (stale-array window after adding/switching ports); fall back to
+    // position for servers that don't yet report `port`.
+    const llmMetrics =
+      metrics.llm?.find((l) => l?.port != null && l.port === port) ??
+      (metrics.llm?.[portIndex]?.port == null ? (metrics.llm?.[portIndex] ?? null) : null);
     const canRemove = portIndex > 0;
     return (
       <LlmPanel
@@ -153,6 +178,8 @@ export function SparkPage({
         shareImage={benchShareImage}
         onRemovePort={canRemove ? handleRemovePort : undefined}
         className={className}
+        conversations={spark.conversations?.[String(port)] ?? []}
+        onAddHarness={onAddHarness}
       />
     );
   };
@@ -165,7 +192,7 @@ export function SparkPage({
           min={1}
           max={65535}
           inputMode="numeric"
-          placeholder="Port number"
+          placeholder={t("page.port")}
           value={newPortDraft}
           onChange={(e) => setNewPortDraft(e.target.value)}
           onKeyDown={(e) => {
@@ -183,7 +210,7 @@ export function SparkPage({
           disabled={!newPortDraft.trim()}
           className="btn btn--sm btn--primary"
         >
-          Add
+          {t("page.add")}
         </button>
         <button
           type="button"
@@ -193,12 +220,39 @@ export function SparkPage({
           }}
           className="btn btn--sm"
         >
-          Cancel
+          {t("page.cancel")}
         </button>
+        <div className="sp-add-port__presets" role="group" aria-label={t("page.presets")}>
+          <span className="sp-hint">{t("page.presetLabel")}</span>
+          <button
+            type="button"
+            title={t("page.lmStudio")}
+            onClick={() => void handleAddPort(1234)}
+            className="btn btn--sm"
+          >
+            LM Studio :1234
+          </button>
+          <button
+            type="button"
+            title={t("page.ollama")}
+            onClick={() => void handleAddPort(11434)}
+            className="btn btn--sm"
+          >
+            Ollama :11434
+          </button>
+          <button
+            type="button"
+            title={t("page.tensorFold")}
+            onClick={() => void handleAddPort(8888)}
+            className="btn btn--sm"
+          >
+            TensorFold :8888
+          </button>
+        </div>
       </div>
     ) : (
       <button type="button" onClick={() => setShowAddPort(true)} className="sp-add-port-btn">
-        + Add LLM port
+        {t("page.addPort")}
       </button>
     )
   ) : null;
@@ -214,7 +268,7 @@ export function SparkPage({
 
   return (
     <div className="sp">
-      <SparkHeader spark={spark} onEdit={onEdit} />
+      <SparkHeader spark={spark} onEdit={onEdit} onNavigate={onNavigate} />
       {/* Mobile-only action row (Update Hermes / Edit / Power) — desktop keeps them in the header. */}
       <SparkActions spark={spark} onEdit={onEdit} className="sp-mobile-actions flex sm:hidden" />
       {spark.online ? <HealthList findings={spark.health} /> : null}
@@ -230,11 +284,25 @@ export function SparkPage({
                 vramContext={showVramBreakdown ? vramContextFor(spark, fleet) : null}
                 sparkId={spark.id}
                 temperatureUnit={temperatureUnit}
+                mac={spark.kind === "mac"}
+                unavailable={metrics.unavailable}
                 chip={spark.hardware.gpuChip}
                 hideMemory={showUnified}
               />
             </Item>
-            {/* Unified memory and CPU sit side by side (they stack when the column is narrow). */}
+            {profileModels && <Item order={5}>{modelsPanel}</Item>}
+            {/* Mac agent transport only: what is actually serving, from the
+                node's own process/port inventory. */}
+            {Array.isArray(metrics.runtimes) && (
+              <Item order={6}>
+                <RuntimesPanel
+                  runtimes={metrics.runtimes}
+                  unavailable={metrics.unavailable}
+                  agentOnline={metrics.agentOnline}
+                />
+              </Item>
+            )}
+            {/* Unified memory (or RAM on a dedicated host) and CPU sit side by side (they stack when the column is narrow). */}
             <Item order={2}>
               <div className="sp-pair">
                 {showUnified && <UnifiedMemoryPanel um={unified} gpu={metrics.gpu} llm={metrics.llm} />}
@@ -243,13 +311,22 @@ export function SparkPage({
                   hardware={spark.hardware}
                   sparkId={spark.id}
                   temperatureUnit={temperatureUnit}
+                  mac={spark.kind === "mac"}
+                  unavailable={metrics.unavailable}
                 />
+                {/* Dedicated hosts have system RAM instead of a unified pool: CPU and RAM side by side.
+                    A Mac's RAM is its unified pool, already shown above (RAM only when the pool is unknown). */}
+                {(spark.kind === "host" || spark.kind === "mac") && !showUnified && <RamPanel ram={metrics.ram} sparkId={spark.id} />}
+                {/* Models is the third column of the row (Windows PCs have no launchers). */}
+                {!profileModels && spark.platform !== "windows" && modelsPanel}
               </div>
             </Item>
-            <Item order={4}>{modelsPanel}</Item>
-            {spark.kind === "host" && (
-              <Item order={6}>
-                <RamPanel ram={metrics.ram} sparkId={spark.id} />
+            {/* History closes the hardware column: the right column (LLM, storage, network) is
+                usually the taller one, so this fills the space under the GPU / memory / CPU row
+                instead of starting below both columns. Stacked (below xl) it stays last. */}
+            {metricsHistory && (
+              <Item order={40}>
+                <HistoryPanel key={spark.id} sparkId={spark.id} kind={spark.kind} platform={spark.platform} temperatureUnit={temperatureUnit} />
               </Item>
             )}
           </div>
@@ -285,14 +362,26 @@ export function SparkPage({
                 onDisabledChange={setDisabledInterfaces}
               />
             </Item>
+            {metrics.roce && metrics.roce.devices.length > 0 && (
+              <Item order={8}>
+                <RocePanel roce={metrics.roce} />
+              </Item>
+            )}
             {tailscaleOn && (
               <Item order={9}>
                 <TailscalePanel tailscale={metrics.tailscale ?? null} />
               </Item>
             )}
+            {/* Same order as Tailnet (DOM order breaks the tie): stays below it when the columns stack. */}
+            {atticOn && (
+              <Item order={9}>
+                <AtticPanel attic={metrics.attic ?? null} />
+              </Item>
+            )}
           </div>
         </div>
       )}
+
     </div>
   );
 }

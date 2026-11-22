@@ -4,28 +4,49 @@ import {
   SystemCollector,
   collectionWasSuccessful,
 } from "../collectors/SystemCollector.js";
+import { MacSystemCollector } from "../collectors/MacSystemCollector.js";
+import { MacAgentCollector } from "../collectors/MacAgentCollector.js";
 import { LlmProbe } from "../collectors/LlmProbe.js";
 import { ComfyProbe } from "../collectors/ComfyProbe.js";
 import { HermesProbe } from "../collectors/HermesProbe.js";
 import { TailscaleProbe } from "../collectors/TailscaleProbe.js";
+import { AtticProbe } from "../collectors/AtticProbe.js";
 import { llmDaily } from "../collectors/LlmDaily.js";
 import { HealthEvaluator } from "../health/HealthEvaluator.js";
+import { getSettings } from "../settings.js";
 import { sshExec } from "../collectors/ssh.js";
+
+/** macOS uptime in seconds from `kern.boottime` (`{ sec = 1791857261, usec = ... } ...`). */
+export const DARWIN_UPTIME_CMD =
+  "b=$(sysctl -n kern.boottime | sed -E 's/^[{] sec = ([0-9]+),.*/\\1/'); echo $(( $(date +%s) - b ))";
 import {
-  POLL_INTERVAL_GPU,
-  POLL_INTERVAL_CPU,
-  POLL_INTERVAL_NETWORK,
   POLL_INTERVAL_STORAGE,
-  POLL_INTERVAL_LLM,
-  POLL_INTERVAL_COMFY,
-  POLL_INTERVAL_BANDWIDTH,
   POLL_INTERVAL_LIVENESS,
   POLL_INTERVAL_HERMES,
   POLL_INTERVAL_TAILSCALE,
+  POLL_INTERVAL_ATTIC,
   LLM_PORT,
   COMFY_PORT,
   HOST_PATHS,
+  resolveFastPollIntervals,
 } from "../config.js";
+
+/**
+ * Domains on a timer of their own that follow Settings → Poll interval
+ * (unless pinned by env — see resolveFastPollIntervals). LLM and ComfyUI follow
+ * it too but are armed only while their monitoring is on. Storage, liveness,
+ * Tailnet, Hermes and the NV_ERR journal scan keep their own cadences.
+ */
+const FAST_TIMER_DOMAINS = ["gpu", "cpu", "network", "ram", "memory"];
+
+/**
+ * How often the resident-model helper (one read-only SSH round trip that asks
+ * the unit's docker for vLLM containers) runs. Slow on purpose: loaded models
+ * change rarely, and it is an SSH exec rather than an HTTP probe.
+ */
+const RESIDENT_MODELS_POLL_MS = 30_000;
+/** A failed discovery keeps the last list this long (three polls) before it is cleared. */
+const RESIDENT_MODELS_GRACE_MS = 3 * RESIDENT_MODELS_POLL_MS;
 
 /**
  * Liveness retry schedule. Network failures widen gradually — a rebooting host
@@ -77,23 +98,32 @@ export function livenessReason(err) {
 }
 
 const ONLINE_GRACE_MS = 10000;
+const POLL_INTERVAL_RUNTIMES = 30_000;
 
 /**
  * SparkMonitor — one per Spark. Owns collectors + rate state + poll loop.
  * Exposes snapshot() for WebSocket pushed payload.
  */
+/** A finding stays this long after its rule last raised it, so a reading near a threshold does not flap. */
+export const HEALTH_CLEAR_HOLD_MS = 90_000;
+
 const HEALTH_LABELS = {
   thermal: "GPU temperature",
   "low-power": "GPU power draw",
   memory: "Unified memory",
   concurrency: "Model concurrency",
   "link-speed": "Network link speed",
+  "roce-link": "RoCE link",
+  "roce-loss": "RoCE packet loss",
 };
 
 export class SparkMonitor {
   /**
    * @param {object} spark
-   * @param {{ onWolMac?: (sparkId: string, mac: string) => void, onHermesChange?: () => void, resolveHeadModelId?: ((headId: string) => string | null) }} [options]
+   * @param {{ onWolMac?: (sparkId: string, mac: string) => void, onHermesChange?: () => void, resolveHeadModelId?: ((headId: string) => string | null), resolveHeadLlmProgressAt?: ((headId: string) => number | null), pollIntervalMs?: number, llmProbeOptions?: () => object }} [options]
+   *   pollIntervalMs: Settings → Poll interval; drives the fast collector timers.
+   *   llmProbeOptions: per-probe options for every LlmProbe this monitor builds
+   *   (e.g. the opt-in stream-sample callbacks); evaluated at construction time.
    */
   constructor(spark, options = {}) {
     this.spark = spark;
@@ -108,7 +138,12 @@ export class SparkMonitor {
     /** @type {boolean | null} null until the first successful GPU sample. */
     this._prevThermal = null;
     /** Health rules + their sample-streak state; findings go out in snapshot().health. */
-    this._healthEval = new HealthEvaluator();
+    this._healthEval = new HealthEvaluator({
+      thresholds: () => {
+        const { healthTempWarnC, healthTempCriticalC } = getSettings();
+        return { warnC: healthTempWarnC, criticalC: healthTempCriticalC };
+      },
+    });
     this._health = [];
     this._prevHealthIds = null;
     // Resolver for worker derived label: maps a head spark id to its live
@@ -116,13 +151,16 @@ export class SparkMonitor {
     // map; never writes back to registry config (derived display only).
     this._resolveHeadModelId =
       typeof options.resolveHeadModelId === "function" ? options.resolveHeadModelId : null;
-    this.collector = new SystemCollector(spark);
+    this._resolveHeadLlmProgressAt =
+      typeof options.resolveHeadLlmProgressAt === "function" ? options.resolveHeadLlmProgressAt : null;
+    this._llmProbeOptions = typeof options.llmProbeOptions === "function" ? options.llmProbeOptions : null;
+    this.collector = createCollector(spark);
 
     // One LlmProbe per port — none when LLM monitoring is off
     this.llmProbes = new Map();
     if (this._llmMonitoringEnabled(spark)) {
       for (const port of this._llmPorts()) {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(port, new LlmProbe(spark, port, this._llmProbeOptions ? this._llmProbeOptions() : undefined));
       }
     }
 
@@ -135,6 +173,9 @@ export class SparkMonitor {
     this.tailscaleProbe = this._tailscaleMonitoringEnabled(spark)
       ? new TailscaleProbe(spark)
       : null;
+
+    /** @type {AtticProbe | null} */
+    this.atticProbe = this._atticMonitoringEnabled(spark) ? new AtticProbe(spark) : null;
 
     /** @type {HermesProbe | null} */
     this.hermesProbe = this._hermesMonitoringEnabled(spark)
@@ -178,12 +219,20 @@ export class SparkMonitor {
       ram: this.collector._defaultRam(),
       storage: [],
       network: this.collector._defaultNetwork(),
+      roce: null,
       unifiedMemory: this.collector._defaultUnifiedMemory(),
       llm: [],
+      residentModels: [],
       comfy: null,
       tailscale: null,
+      /** Mac-agent units only: detected model runtimes + what it could not read. */
+      runtimes: null,
+      unavailable: null,
+      attic: null,
     };
     this._lastUpdate = {};
+    /** domain → epoch ms of the last poll that returned real data (see _domainSucceeded). Not in snapshot(): it would defeat the broadcast cache. */
+    this._lastSuccess = {};
     this._metricCollectionSuccessful = { gpu: false, cpu: false };
     /**
      * Last poll (epoch ms) in which each LLM port generated or prefilled
@@ -192,30 +241,19 @@ export class SparkMonitor {
      */
     this._llmLastActiveAt = new Map();
 
-    // Hardware summary: kind "spark" uses the static DGX Spark specs; kind
-    // "host" (dedicated GPU Linux box) detects real hardware once in the
-    // background so the header doesn't mislabel the machine as a Spark.
+    // Hardware summary: kind "spark" uses the static DGX Spark specs; kinds
+    // "host" (dedicated GPU Linux box) and "mac" (Apple Silicon) detect real
+    // hardware once in the background so the header doesn't mislabel the
+    // machine as a Spark.
     this._hardwareSummary = this._staticHardwareSummary(spark);
     this._stopped = false;
-    if (spark?.kind === "host") {
-      void this.collector
-        .detectHardware()
-        .then((detected) => {
-          if (this._stopped || !detected) return;
-          this._hardwareSummary = { ...this._hardwareSummary, ...detected };
-        })
-        .catch(() => {});
-    } else if (spark?.kind === "mac") {
-      void this.collector
-        .detectMacHardware()
-        .then((detected) => {
-          if (this._stopped || !detected) return;
-          this._hardwareSummary = { ...this._hardwareSummary, ...detected };
-        })
-        .catch(() => {});
-    }
+    this._detectHardwareInBackground();
 
     // Timers
+    /** Per-domain cadence for the fast collectors (ms). */
+    this._fastIntervals = resolveFastPollIntervals(options.pollIntervalMs);
+    /** @type {Record<string, ReturnType<typeof setInterval>>} fast domain → timer */
+    this._domainTimers = {};
     this._intervals = [];
     /** @type {ReturnType<typeof setInterval> | null} */
     this._llmIntervalId = null;
@@ -225,10 +263,14 @@ export class SparkMonitor {
     this._hermesIntervalId = null;
     /** @type {ReturnType<typeof setInterval> | null} */
     this._tailscaleIntervalId = null;
+    /** @type {ReturnType<typeof setInterval> | null} */
+    this._runtimesIntervalId = null;
+    this._atticIntervalId = null;
     this._running = false;
     this._runGeneration = 0;
     /** @type {Record<string, boolean | symbol>} in-flight domain guards */
     this._inflight = {};
+
   }
 
   /** Hot-update config without tearing down poll loops / rate baselines. */
@@ -243,12 +285,30 @@ export class SparkMonitor {
     const prevComfyPort = this._comfyPort(this.spark);
     const wasHermes = this._hermesMonitoringEnabled(this.spark);
     const wasTailscale = this._tailscaleMonitoringEnabled(this.spark);
+    const wasAttic = this._atticMonitoringEnabled(this.spark);
     this.collector.invalidatePendingCollections();
     this._runGeneration += 1;
     this._inflight = {};
     this._metricCollectionSuccessful = { gpu: false, cpu: false };
+    const kindChanged = (this.spark?.kind === "mac") !== (spark?.kind === "mac");
+    // The agent endpoint is baked into the collector, so moving or removing it
+    // needs a fresh collector just like a kind change does.
+    const transportChanged =
+      JSON.stringify(this.spark?.agent ?? null) !== JSON.stringify(spark?.agent ?? null);
     this.spark = spark;
-    this.collector.spark = spark;
+    if (kindChanged || transportChanged) {
+      this.collector.dispose?.();
+      this.collector = createCollector(spark);
+      if (this._running) this.collector.useNvidiaSmiStreams?.(this._fastIntervals);
+      this._metrics.runtimes = null;
+      this._metrics.unavailable = null;
+      this._metrics.agentOnline = null;
+      this._hardwareSummary = this._staticHardwareSummary(spark);
+      this._detectHardwareInBackground();
+    } else {
+      this.collector.spark = spark;
+    }
+    if (kindChanged || transportChanged) this._restartRuntimesPollInterval();
 
     // Rebuild LLM probe map — add new ports, remove stale ones, update existing
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
@@ -260,11 +320,18 @@ export class SparkMonitor {
         existing.spark = spark;
         this.llmProbes.set(port, existing);
       } else {
-        this.llmProbes.set(port, new LlmProbe(spark, port));
+        this.llmProbes.set(port, new LlmProbe(spark, port, this._llmProbeOptions ? this._llmProbeOptions() : undefined));
       }
+    }
+    for (const [port, probe] of prevProbes) {
+      if (!this.llmProbes.has(port)) probe.dispose?.();
     }
     if (!this._llmMonitoringEnabled()) {
       this._metrics.llm = [];
+    }
+    if (!this._residentModelsEnabled()) {
+      this._metrics.residentModels = [];
+      delete this._lastSuccess.residentModels;
     }
 
     // ComfyUI probe — create / update / clear
@@ -299,6 +366,18 @@ export class SparkMonitor {
       this._metrics.tailscale = null;
     }
 
+    // Display-carveout probe — create / update / clear
+    if (this._atticMonitoringEnabled()) {
+      if (this.atticProbe) {
+        this.atticProbe.setTarget(spark);
+      } else {
+        this.atticProbe = new AtticProbe(spark);
+      }
+    } else {
+      this.atticProbe = null;
+      this._metrics.attic = null;
+    }
+
     // Hermes probe — create / update / clear
     if (this._hermesMonitoringEnabled()) {
       if (this.hermesProbe) {
@@ -327,6 +406,9 @@ export class SparkMonitor {
     if (this._running && wasTailscale !== this._tailscaleMonitoringEnabled()) {
       this._restartTailscalePollInterval();
     }
+    if (this._running && wasAttic !== this._atticMonitoringEnabled()) {
+      this._restartAtticPollInterval();
+    }
   }
 
   /**
@@ -338,6 +420,13 @@ export class SparkMonitor {
     if (role === "worker") return false;
     if (role === "head") return true;
     return spark?.llmMonitoring !== false;
+  }
+
+  /** Resident-model discovery: LLM monitoring on, remote, and a Linux host. */
+  _residentModelsEnabled(spark = this.spark) {
+    if (!this._llmMonitoringEnabled(spark)) return false;
+    if (spark?.isLocal) return false;
+    return spark?.platform !== "windows" && spark?.platform !== "darwin";
   }
 
   /**
@@ -358,6 +447,24 @@ export class SparkMonitor {
       if (id) return id;
     }
     return null;
+  }
+
+  /** Last measured inference progress on this node, never a worker's inherited progress. */
+  llmProgressAt() {
+    if (!this.online || !this._llmMonitoringEnabled()) return null;
+    return this._healthEval.llmProgressAt;
+  }
+
+  /** A worker without local probes uses only its explicitly configured head. */
+  _headLlmProgressAt() {
+    const role = this.spark.role || (this.spark.workerNode ? "worker" : "standalone");
+    const headId = this.spark.workerHeadId;
+    if (role !== "worker" || this._llmMonitoringEnabled() || !headId || headId === this.spark.id) return null;
+    try {
+      return this._resolveHeadLlmProgressAt?.(headId) ?? null;
+    } catch {
+      return null;
+    }
   }
 
   /**
@@ -393,8 +500,7 @@ export class SparkMonitor {
       this._llmIntervalId = null;
     }
     if (this._llmMonitoringEnabled() && this._running) {
-      this._llmIntervalId = setInterval(() => this._pollDomain("llm"), POLL_INTERVAL_LLM);
-      this._intervals.push(this._llmIntervalId);
+      this._llmIntervalId = this._armDomainTimer("llm");
       void this._pollDomain("llm");
     }
   }
@@ -422,8 +528,7 @@ export class SparkMonitor {
       this._comfyIntervalId = null;
     }
     if (this._comfyMonitoringEnabled() && this._running) {
-      this._comfyIntervalId = setInterval(() => this._pollDomain("comfy"), POLL_INTERVAL_COMFY);
-      this._intervals.push(this._comfyIntervalId);
+      this._comfyIntervalId = this._armDomainTimer("comfy");
       void this._pollDomain("comfy");
     }
   }
@@ -450,6 +555,29 @@ export class SparkMonitor {
       );
       this._intervals.push(this._tailscaleIntervalId);
       void this._pollDomain("tailscale");
+    }
+  }
+
+  /**
+   * Opt-in display-carveout card (GB10 Sparks; default off). When off, no
+   * probe exists and nothing runs.
+   * @param {object} [spark]
+   */
+  _atticMonitoringEnabled(spark = this.spark) {
+    return Boolean(spark?.atticMonitoring);
+  }
+
+  /** Start or clear the display-carveout poll timer based on monitoring flag. */
+  _restartAtticPollInterval() {
+    if (this._atticIntervalId != null) {
+      clearInterval(this._atticIntervalId);
+      this._intervals = this._intervals.filter((id) => id !== this._atticIntervalId);
+      this._atticIntervalId = null;
+    }
+    if (this._atticMonitoringEnabled() && this._running) {
+      this._atticIntervalId = setInterval(() => this._pollDomain("attic"), POLL_INTERVAL_ATTIC);
+      this._intervals.push(this._atticIntervalId);
+      void this._pollDomain("attic");
     }
   }
 
@@ -495,7 +623,8 @@ export class SparkMonitor {
       ports.add(port);
       const gen = Number(entry.generationTps);
       const pre = Number(entry.prefillTps);
-      if ((Number.isFinite(gen) && gen > 0) || (Number.isFinite(pre) && pre > 0)) {
+      if (entry.available && (entry.decodeActive === true || entry.prefillActive === true ||
+        (Number.isFinite(gen) && gen > 0) || (Number.isFinite(pre) && pre > 0))) {
         this._llmLastActiveAt.set(port, now);
       }
       return { ...entry, lastActiveAt: this._llmLastActiveAt.get(port) ?? null };
@@ -521,23 +650,65 @@ export class SparkMonitor {
     return [LLM_PORT];
   }
 
+  /** Repeating poll of one domain at its current cadence; tracked for stop(). */
+  _armDomainTimer(domain) {
+    const id = setInterval(() => this._pollDomain(domain), this._fastIntervals[domain]);
+    this._intervals.push(id);
+    return id;
+  }
+
+  _clearTimer(id) {
+    clearInterval(id);
+    this._intervals = this._intervals.filter((other) => other !== id);
+  }
+
+  /**
+   * Apply a new Settings → Poll interval. Only timers whose cadence actually
+   * changes are re-armed, and nothing else is touched: in-flight guards, the
+   * run generation, liveness backoff and the offline pause all carry over, so
+   * a poll already running is neither duplicated nor discarded.
+   * @param {number} pollIntervalMs
+   */
+  setPollInterval(pollIntervalMs) {
+    const prev = this._fastIntervals;
+    this._fastIntervals = resolveFastPollIntervals(pollIntervalMs);
+    if (!this._running) return;
+    this.collector.useNvidiaSmiStreams?.(this._fastIntervals);
+    for (const domain of FAST_TIMER_DOMAINS) {
+      if (prev[domain] === this._fastIntervals[domain]) continue;
+      if (this._domainTimers[domain] != null) this._clearTimer(this._domainTimers[domain]);
+      this._domainTimers[domain] = this._armDomainTimer(domain);
+    }
+    if (this._llmIntervalId != null && prev.llm !== this._fastIntervals.llm) {
+      this._clearTimer(this._llmIntervalId);
+      this._llmIntervalId = this._armDomainTimer("llm");
+    }
+    if (this._comfyIntervalId != null && prev.comfy !== this._fastIntervals.comfy) {
+      this._clearTimer(this._comfyIntervalId);
+      this._comfyIntervalId = this._armDomainTimer("comfy");
+    }
+  }
+
   /** Start background polling. */
   start() {
     if (this._running) return;
     this._runGeneration += 1;
     this._running = true;
     this._stopped = false;
+    // Local nvidia-smi then runs as long-lived readers at these cadences.
+    this.collector.useNvidiaSmiStreams?.(this._fastIntervals);
     this._poll();
-    this._intervals.push(setInterval(() => this._pollDomain("gpu"), POLL_INTERVAL_GPU));
-    this._intervals.push(setInterval(() => this._pollDomain("cpu"), POLL_INTERVAL_CPU));
-    this._intervals.push(setInterval(() => this._pollDomain("network"), POLL_INTERVAL_NETWORK));
+    for (const domain of FAST_TIMER_DOMAINS) {
+      this._domainTimers[domain] = this._armDomainTimer(domain);
+    }
     this._intervals.push(setInterval(() => this._pollDomain("storage"), POLL_INTERVAL_STORAGE));
-    this._intervals.push(setInterval(() => this._pollDomain("ram"), POLL_INTERVAL_CPU));
-    this._intervals.push(setInterval(() => this._pollDomain("memory"), POLL_INTERVAL_BANDWIDTH));
+    this._intervals.push(setInterval(() => this._pollDomain("residentModels"), RESIDENT_MODELS_POLL_MS));
     this._restartLlmPollInterval();
     this._restartComfyPollInterval();
     this._restartHermesPollInterval();
     this._restartTailscalePollInterval();
+    this._restartRuntimesPollInterval();
+    this._restartAtticPollInterval();
     // Liveness on a slightly slower cadence
     this._intervals.push(setInterval(() => this._checkOnline(), POLL_INTERVAL_LIVENESS));
     console.log(`[SparkMonitor] ${this.spark.id} started`);
@@ -546,17 +717,28 @@ export class SparkMonitor {
   /** Stop background polling. */
   stop() {
     this.collector.invalidatePendingCollections();
+    this.collector.dispose?.();
     this._runGeneration += 1;
     this._metricCollectionSuccessful = { gpu: false, cpu: false };
     this._running = false;
     this._stopped = true;
     for (const id of this._intervals) clearInterval(id);
     this._intervals = [];
+    this._domainTimers = {};
     this._llmIntervalId = null;
     this._comfyIntervalId = null;
     this._hermesIntervalId = null;
     this._tailscaleIntervalId = null;
+    this._runtimesIntervalId = null;
+    this._atticIntervalId = null;
     this._inflight = {};
+    for (const probe of this.llmProbes.values()) {
+      try {
+        probe.dispose();
+      } catch {
+        /* ignore */
+      }
+    }
     if (this.comfyProbe) {
       try {
         this.comfyProbe.dispose();
@@ -572,10 +754,13 @@ export class SparkMonitor {
     const ports = this._llmMonitoringEnabled() ? this._llmPorts() : [];
     const comfyOn = this._comfyMonitoringEnabled();
     const tailscaleOn = this._tailscaleMonitoringEnabled();
+    const atticOn = this._atticMonitoringEnabled();
     return {
       id: this.spark.id,
       name: this.spark.name,
       kind: this.spark.kind || "spark",
+      ...(this.spark.kind === "mac" ? { macTransport: this.spark.agent ? "agent" : "ssh" } : {}),
+      platform: this.spark.platform || "linux",
       online: this.online,
       /** Last liveness failure, or null. "offline" with no reason is a bug. */
       offlineReason: this.online ? null : this.offlineReason,
@@ -603,26 +788,29 @@ export class SparkMonitor {
       comfyMonitoring: comfyOn,
       comfyPort: this._comfyPort(),
       tailscaleMonitoring: tailscaleOn,
+      atticMonitoring: atticOn,
       hermes: this._hermes,
       health: this._health,
       hardware: this._hardwareSummary,
       metrics: {
-        // NOTE: no `timestamp` here on purpose. The broadcast path skips
-        // snapshots whose JSON is byte-identical to the previous one (see
-        // startBroadcast); a per-snapshot Date.now() would defeat that cache,
-        // forcing a broadcast + frontend re-render every tick even when all
-        // measured values are unchanged. The frontend does not consume a
-        // metrics timestamp; the WS receive time can serve if one is ever
-        // needed.
+        // NOTE: no `timestamp` here. The frontend does not consume a metrics
+        // timestamp; the broadcast envelope's `generatedAt` (see
+        // buildSnapshotPayload) and the WS receive time already serve.
         gpu: this._metrics.gpu,
         cpu: this._metrics.cpu,
         ram: this._metrics.ram,
         storage: this._metrics.storage,
         network: this._metrics.network,
+        roce: this._metrics.roce ?? null,
         unifiedMemory: this._metrics.unifiedMemory,
         llm: this._metrics.llm,
+        runtimes: this._metrics.runtimes,
+        unavailable: this._metrics.unavailable,
+        agentOnline: this._metrics.agentOnline ?? null,
+        residentModels: this._metrics.residentModels,
         comfy: comfyOn ? this._metrics.comfy : null,
         tailscale: tailscaleOn ? this._metrics.tailscale : null,
+        attic: atticOn ? this._metrics.attic : null,
       },
     };
   }
@@ -630,20 +818,20 @@ export class SparkMonitor {
   // ─── Uptime helper ─────────────────────────────────────────
   /** Read system uptime from /proc/uptime (local or via SSH). */
   async _readUptime() {
+    if (this.spark.kind === "mac") {
+      const boot = await this.collector.readBootTime();
+      return boot ? Math.max(0, Math.floor(Date.now() / 1000 - boot)) : null;
+    }
+    if (this.spark.platform === "windows" && !this.spark.isLocal) {
+      return this.collector.readWindowsUptime();
+    }
     let content;
     if (this.spark.isLocal) {
       const mapped = path.join(HOST_PATHS.PROC, "uptime");
       content = fs.readFileSync(mapped, "utf8");
-    } else if (this.spark.kind === "mac") {
-      // kern.boottime → "{ sec = 1784734911, usec = 523192 } …"
-      const out = await sshExec(this.spark, "sysctl -n kern.boottime; date +%s");
-      const lines = out.split("\n").map((s) => s.trim()).filter(Boolean);
-      const secMatch = (lines[0] || "").match(/sec\s*=\s*(\d+)/);
-      const nowSec = parseInt(lines[lines.length - 1] || "", 10);
-      if (secMatch && Number.isFinite(nowSec)) {
-        return Math.max(0, nowSec - parseInt(secMatch[1], 10));
-      }
-      return null;
+    } else if (this.spark.platform === "darwin") {
+      // macOS has no /proc/uptime; without this every Mac unit stays offline.
+      content = await sshExec(this.spark, DARWIN_UPTIME_CMD);
     } else {
       content = await sshExec(this.spark, "cat /proc/uptime");
     }
@@ -683,18 +871,28 @@ export class SparkMonitor {
           gpu: this._metrics.gpu,
           unifiedMemory: this._metrics.unifiedMemory,
           network: this._metrics.network,
+          roce: this._metrics.roce,
           llm: this._metrics.llm,
+          headLlmProgressAt: this._headLlmProgressAt(),
+        runtimes: this._metrics.runtimes,
+        unavailable: this._metrics.unavailable,
+        agentOnline: this._metrics.agentOnline ?? null,
         },
         domain
       );
-      this._health = findings;
+      // A reading that hovers around a threshold (a GPU at 85 °C, memory near 3 GB) would
+      // raise and clear its finding every few seconds, and log an event each time. Keep a
+      // finding for HEALTH_CLEAR_HOLD_MS after the rule last raised it.
+      const now = this._healthNow();
+      const held = this._holdFindings(findings, now);
+      this._health = held;
       const name = this.spark.name || this.spark.id;
       for (const e of ev.pendingEvents) this._emit(e);
-      const ids = new Set(findings.map((f) => f.id));
+      const ids = new Set(held.map((f) => f.id));
       const prev = this._prevHealthIds;
       this._prevHealthIds = ids;
       if (prev == null) return;
-      for (const f of findings) {
+      for (const f of held) {
         if (prev.has(f.id) || f.id === "xid" || f.id === "oom") continue;
         this._emit({
           type: `health.${f.id}`,
@@ -709,6 +907,88 @@ export class SparkMonitor {
     } catch (err) {
       console.error(`[SparkMonitor] ${this.spark.id} health error:`, err?.message);
     }
+  }
+
+  /** Wall clock for the health hold; a method so tests can drive it. */
+  _healthNow() {
+    return Date.now();
+  }
+
+  /**
+   * Findings the rules raised now, plus those raised within the last HEALTH_CLEAR_HOLD_MS
+   * that no longer hold (shown with their last detail until the hold runs out).
+   */
+  _holdFindings(findings, now) {
+    this._healthSeen ??= new Map();
+    // Measured progress disproves a stall; do not retain the old warning for 90 seconds.
+    if (this._healthEval.lowPowerProgressing) this._healthSeen.delete("low-power");
+    for (const f of findings) this._healthSeen.set(f.id, { finding: f, at: now });
+    const out = [...findings];
+    const present = new Set(findings.map((f) => f.id));
+    for (const [id, rec] of this._healthSeen) {
+      if (present.has(id)) continue;
+      // The kernel-error findings keep their own one-hour memory in the evaluator.
+      if (now - rec.at < HEALTH_CLEAR_HOLD_MS && id !== "xid" && id !== "oom") out.push(rec.finding);
+      else this._healthSeen.delete(id);
+    }
+    return out;
+  }
+
+  /**
+   * Did this poll return real data? Collectors catch their own errors and answer with
+   * zeroed defaults, so "the poll finished" says nothing about the data (a stuck
+   * nvidia-smi, an SSH session that logs in but cannot run the command).
+   */
+  _domainSucceeded(domain, result) {
+    switch (domain) {
+      case "gpu":
+      case "cpu":
+        return collectionWasSuccessful(result);
+      case "ram":
+      case "memory":
+        return Number(result?.total) > 0;
+      case "network":
+        return Array.isArray(result?.interfaces) && result.interfaces.length > 0;
+      case "storage":
+        return Array.isArray(result) && result.length > 0;
+      case "residentModels":
+        return Array.isArray(result);
+      case "llm":
+        return Array.isArray(result); // an engine that is down is still a successful probe
+      default:
+        return false;
+    }
+  }
+
+  /** domain → epoch ms of the last poll that returned real data (for the Prometheus export). */
+  lastSuccess() {
+    const out = { ...this._lastSuccess };
+    // A domain that is no longer polled must not age forever and trip a "stuck" alert.
+    if (this.spark.storagePollDisabled) delete out.storage;
+    if (!this._llmMonitoringEnabled()) delete out.llm;
+    return out;
+  }
+
+  /** Epoch ms of the last poll of `domain` that returned real data, or null (never, or not polled). */
+  lastCollectedAt(domain) {
+    const at = this._lastSuccess[domain];
+    return Number.isFinite(at) ? at : null;
+  }
+
+  /**
+   * Whether the latest completed poll of `domain` returned real data. A failed GPU/CPU read is
+   * zero-filled and every other domain keeps its previous value, so "the poll ran" is not enough.
+   */
+  collectionOk(domain) {
+    if (domain === "gpu" || domain === "cpu") return this._metricCollectionSuccessful[domain] === true;
+    const at = this._lastSuccess[domain];
+    return Number.isFinite(at) && at === this._lastUpdate[domain];
+  }
+
+  /** Current cadence (ms) of a collector that follows Settings → Poll interval, or null for other domains. */
+  pollIntervalMs(domain) {
+    const ms = this._fastIntervals[domain];
+    return Number.isFinite(ms) && ms > 0 ? ms : null;
   }
 
   _noteThrottle(gpu) {
@@ -798,16 +1078,36 @@ export class SparkMonitor {
   _invalidateSshMetrics() {
     if (this.spark.isLocal) return;
     const c = this.collector;
+    // Their data is gone; the series must restart from the first fresh poll after recovery.
+    for (const key of ["gpu", "cpu", "ram", "memory", "network", "storage", "roce"]) delete this._lastSuccess[key];
     this._metrics.gpu = c._defaultGpu();
     this._metrics.cpu = c._defaultCpu();
     this._metrics.ram = c._defaultRam();
     this._metrics.storage = [];
     this._metrics.network = c._defaultNetwork();
+    this._metrics.roce = null;
     this._metrics.unifiedMemory = c._defaultUnifiedMemory();
     this._metricCollectionSuccessful = { gpu: false, cpu: false };
   }
 
   // ─── Polling ──────────────────────────────────────────────
+  /** Keep agent inventory fresh, including recovery after startup probes fail. */
+  _restartRuntimesPollInterval() {
+    if (this._runtimesIntervalId != null) {
+      clearInterval(this._runtimesIntervalId);
+      this._intervals = this._intervals.filter((id) => id !== this._runtimesIntervalId);
+      this._runtimesIntervalId = null;
+    }
+    if (this._running && this.collector instanceof MacAgentCollector) {
+      this._runtimesIntervalId = setInterval(
+        () => this._pollDomain("runtimes"),
+        POLL_INTERVAL_RUNTIMES
+      );
+      this._intervals.push(this._runtimesIntervalId);
+      void this._pollDomain("runtimes");
+    }
+  }
+
   async _poll() {
     if (!this._running) return;
     await Promise.all([
@@ -818,10 +1118,13 @@ export class SparkMonitor {
       this._pollDomain("storage"),
       this._pollDomain("ram"),
       this._pollDomain("memory"),
+      this._pollDomain("runtimes"),
       this._pollDomain("llm"),
       this._pollDomain("comfy"),
       this._pollDomain("hermes"),
       this._pollDomain("tailscale"),
+      this._pollDomain("attic"),
+      this._pollDomain("residentModels"),
     ]);
   }
 
@@ -852,15 +1155,25 @@ export class SparkMonitor {
     if (domain === "storage" && this.spark.storagePollDisabled) return;
     // Worker nodes: no local LLM API
     if (domain === "llm" && !this._llmMonitoringEnabled()) return;
+    // Resident models are discovered over SSH, so only for units whose LLM
+    // monitoring is on (never workers) and that are remote Linux hosts.
+    if (domain === "residentModels" && !this._residentModelsEnabled()) return;
     if (domain === "comfy" && !this._comfyMonitoringEnabled()) return;
     if (domain === "hermes" && !this._hermesMonitoringEnabled()) return;
     if (domain === "tailscale" && !this._tailscaleMonitoringEnabled()) return;
+    // Only agent-backed units can report runtimes / declared gaps.
+    if (domain === "runtimes" && typeof this.collector.collectRuntimes !== "function") return;
+    if (domain === "attic" && !this._atticMonitoringEnabled()) return;
     const runGeneration = this._runGeneration;
     const pollToken = Symbol(domain);
     this._inflight[domain] = pollToken;
     try {
       let result;
+      let roce;
       switch (domain) {
+        case "residentModels":
+          result = await this.collector.probeResidentModels(); // null = could not tell
+          break;
         case "gpu":
           result = await this.collector.collectGpu();
           break;
@@ -872,12 +1185,22 @@ export class SparkMonitor {
           break;
         case "network":
           result = await this.collector.collectNetwork();
+          // RoCE rides the network tick: it throttles itself, never fails the poll and never
+          // holds the network result for more than a moment (a wedged NIC can stall ethtool).
+          // `undefined` = could not read this time: keep the previous value.
+          roce = await Promise.race([
+            this.collector.collectRoce().catch(() => undefined),
+            new Promise((resolve) => setTimeout(() => resolve(undefined), 3000).unref?.()),
+          ]);
           break;
         case "storage":
           result = await this.collector.collectStorage();
           break;
         case "memory":
           result = await this.collector.collectUnifiedMemory();
+          break;
+        case "runtimes":
+          result = await this.collector.collectRuntimes();
           break;
         case "llm":
           // Probe all ports in parallel
@@ -891,6 +1214,9 @@ export class SparkMonitor {
         case "tailscale":
           result = this.tailscaleProbe ? await this.tailscaleProbe.probe() : null;
           break;
+        case "attic":
+          result = this.atticProbe ? await this.atticProbe.probe() : null;
+          break;
         case "hermes":
           result = this.hermesProbe ? await this.hermesProbe.check() : null;
           break;
@@ -902,6 +1228,15 @@ export class SparkMonitor {
       // otherwise race the tail-end await onto the wrong object.
       if (!this._running || this._runGeneration !== runGeneration) return;
       switch (domain) {
+        case "residentModels":
+          // A failed discovery (result null) must neither look like "no models" nor
+          // flap the card: keep the previous list until it is a few polls old.
+          if (result !== null) {
+            this._metrics.residentModels = result;
+          } else if (Date.now() - (this._lastSuccess.residentModels ?? 0) > RESIDENT_MODELS_GRACE_MS) {
+            this._metrics.residentModels = [];
+          }
+          break;
         case "gpu":
           this._metrics.gpu = result;
           this._metricCollectionSuccessful.gpu = collectionWasSuccessful(result);
@@ -917,6 +1252,7 @@ export class SparkMonitor {
           break;
         case "network":
           this._metrics.network = result;
+          if (roce !== undefined) this._metrics.roce = roce;
           this._updateHealth();
           if (result?.wolMac && this._onWolMac) {
             try {
@@ -933,11 +1269,16 @@ export class SparkMonitor {
           this._metrics.unifiedMemory = result;
           this._updateHealth();
           break;
+        case "runtimes":
+          this._metrics.runtimes = Array.isArray(result?.runtimes) ? result.runtimes : null;
+          this._metrics.unavailable = Array.isArray(result?.unavailable) ? result.unavailable : [];
+          this._metrics.agentOnline = Boolean(result?.agentOnline);
+          break;
         case "llm":
           {
             const probes = Array.from(this.llmProbes.values());
             this._metrics.llm = this._stampLlmLastActive(probes, result);
-            this._updateHealth();
+            this._updateHealth("llm");
             for (let i = 0; i < result.length; i++) {
               const probe = probes[i];
               if (probe) llmDaily.record(this.spark.id, probe.port, result[i]);
@@ -950,12 +1291,24 @@ export class SparkMonitor {
         case "tailscale":
           this._metrics.tailscale = result;
           break;
+        case "attic":
+          this._metrics.attic = result;
+          break;
         case "hermes":
           this.applyHermesCheck(result);
           break;
       }
       this._lastUpdate[domain] = Date.now();
+      if (this._domainSucceeded(domain, result)) this._lastSuccess[domain] = this._lastUpdate[domain];
+      // RoCE keeps its last good sample through a few failed reads: stamp it with when it was
+      // actually read, so a stalled RoCE read ages instead of looking fresh.
+      if (domain === "network" && roce?.sampledAt) this._lastSuccess.roce = roce.sampledAt;
     } catch (err) {
+      if (domain === "runtimes" && this._running && this._runGeneration === runGeneration) {
+        this._metrics.runtimes = [];
+        this._metrics.unavailable = [{ metric: "agent", reason: "mac agent runtimes probe failed" }];
+        this._metrics.agentOnline = false;
+      }
       if (
         this._running &&
         this._runGeneration === runGeneration &&
@@ -983,6 +1336,7 @@ export class SparkMonitor {
       if (!this._running || this._runGeneration !== runGeneration) return;
       this._metrics.storage = result;
       this._lastUpdate[domain] = Date.now();
+      if (this._domainSucceeded(domain, result)) this._lastSuccess[domain] = this._lastUpdate[domain];
     } catch (err) {
       console.error(`[SparkMonitor] ${this.spark.id} ${domain} refresh error:`, err.message);
     } finally {
@@ -1136,12 +1490,39 @@ export class SparkMonitor {
   /**
    * Static summary used for kind "spark" (DGX Spark specs) and as the
    * pre-detection fallback for kind "host". kind "host" is then enriched
-   * with real hardware from `detectHardware()` once available.
+   * with real hardware from `detectHardware()` once available; kind "mac"
+   * likewise starts from a generic Apple Silicon summary.
    */
+  _detectHardwareInBackground() {
+    if (this.spark?.kind !== "host" && this.spark?.kind !== "mac") return;
+    const collector = this.collector;
+    const detectPromise =
+      this.spark?.kind === "host" && this.spark?.platform === "windows"
+        ? collector.detectWindowsHardware()
+        : collector.detectHardware();
+    void detectPromise
+      .then((detected) => {
+        if (this._stopped || !detected || collector !== this.collector) return;
+        this._hardwareSummary = { ...this._hardwareSummary, ...detected };
+      })
+      .catch(() => {});
+  }
+
   _staticHardwareSummary(spark) {
+    if (spark?.kind === "mac") {
+      return {
+        device: "Apple Silicon Mac",
+        cpuModel: null,
+        cpuCores: null,
+        totalMemoryGB: null,
+        gpuChip: null,
+        cudaDriver: null,
+        storageModel: null,
+      };
+    }
     if (spark?.kind === "host") {
       return {
-        device: "Linux GPU host",
+        device: spark.platform === "windows" ? "Windows GPU host" : "Linux GPU host",
         cpuModel: null,
         cpuCores: null,
         totalMemoryGB: null,
@@ -1171,4 +1552,17 @@ export class SparkMonitor {
       storageModel: null,
     };
   }
+}
+
+/**
+ * Metrics collector for a unit: Apple Silicon Macs with an on-device agent are
+ * read from that agent (vitals + runtime inventory); Macs without one use stock
+ * macOS tools over SSH; every other kind uses the Linux/NVIDIA collector.
+ * @param {object} spark
+ */
+export function createCollector(spark) {
+  if (spark?.kind !== "mac") return new SystemCollector(spark);
+  return spark.agent
+    ? new MacAgentCollector(spark)
+    : new MacSystemCollector(spark);
 }

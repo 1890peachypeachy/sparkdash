@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { SparkMonitor } from "../SparkMonitor.js";
+import { SparkMonitor, HEALTH_CLEAR_HOLD_MS } from "../SparkMonitor.js";
+import { LOW_POWER_STREAK, LOW_POWER_PROGRESS_MS } from "../../health/HealthEvaluator.js";
+import { llmDaily } from "../../collectors/LlmDaily.js";
 import {
   COLLECTION_SUCCESS,
   SystemCollector,
@@ -236,4 +238,234 @@ test("a storage refresh from an earlier run cannot commit or clear a restarted r
   assert.deepEqual(monitor.snapshot().metrics.storage, [{ mount: "/current" }]);
   assert.equal(monitor._inflight.storage, false);
   monitor.stop();
+});
+
+test("manual llm refresh invokes the probe and publishes its result", async () => {
+  const monitor = new SparkMonitor({ ...spark(), llmMonitoring: true });
+  monitor._running = true;
+  let calls = 0;
+  const result = { available: false };
+  monitor.llmProbes = new Map([[8888, { port: 8888, probe: async () => { calls++; return result; } }]]);
+  await monitor.refreshDomain("llm");
+  assert.equal(calls, 1);
+  assert.equal(monitor._metrics.llm.length, 1);
+  assert.equal(monitor._metrics.llm[0].available, false);
+});
+
+test("lastSuccess only advances when a poll returns real data (a stuck collector stops moving)", async () => {
+  const monitor = new SparkMonitor(spark());
+  monitor._running = true;
+  monitor.collector.collectGpu = async () => tagged(validGpu());
+  monitor.collector.collectRam = async () => ({ used: 10, total: 100, percentage: 10 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  const first = monitor.lastSuccess();
+  assert.ok(first.gpu > 0 && first.ram > 0);
+
+  // The collectors now answer with their zeroed defaults, as they do when the command fails.
+  await new Promise((r) => setTimeout(r, 5));
+  monitor.collector.collectGpu = async () => validGpu(); // untagged = not a successful collection
+  monitor.collector.collectRam = async () => ({ used: 0, total: 0, percentage: 0 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  assert.deepEqual(monitor.lastSuccess(), first);
+  assert.ok(monitor._lastUpdate.gpu >= first.gpu); // the poll itself still ran
+
+  // lastSuccess is a copy, and never part of the snapshot (it would defeat the broadcast cache).
+  monitor.lastSuccess().gpu = 0;
+  assert.equal(monitor.lastSuccess().gpu, first.gpu);
+  assert.equal("collectedAt" in monitor.snapshot(), false);
+});
+
+test("public freshness accessors: last real collection, latest poll ok, current cadence", async () => {
+  const monitor = new SparkMonitor(spark(), { pollIntervalMs: 10_000 });
+  assert.equal(monitor.lastCollectedAt("gpu"), null);
+  assert.equal(monitor.collectionOk("gpu"), false);
+  assert.equal(monitor.collectionOk("ram"), false);
+  assert.equal(monitor.pollIntervalMs("gpu"), 10_000);
+  assert.equal(monitor.pollIntervalMs("storage"), null, "not a fast domain");
+  monitor.setPollInterval(4000); // before _running, so no timers are armed
+  assert.equal(monitor.pollIntervalMs("cpu"), 4000, "follows Settings → Poll interval");
+  monitor._running = true;
+
+  monitor.collector.collectGpu = async () => tagged(validGpu());
+  monitor.collector.collectRam = async () => ({ used: 10, total: 100, percentage: 10 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  const at = monitor.lastCollectedAt("ram");
+  assert.ok(at > 0 && monitor.lastCollectedAt("gpu") > 0);
+  assert.equal(monitor.collectionOk("gpu"), true);
+  assert.equal(monitor.collectionOk("ram"), true);
+
+  // A failed poll: the previous value stays in the snapshot, but it is no longer "ok".
+  await new Promise((r) => setTimeout(r, 5));
+  monitor.collector.collectGpu = async () => validGpu();
+  monitor.collector.collectRam = async () => ({ used: 0, total: 0, percentage: 0 });
+  await monitor._pollDomain("gpu");
+  await monitor._pollDomain("ram");
+  assert.equal(monitor.collectionOk("gpu"), false);
+  assert.equal(monitor.collectionOk("ram"), false);
+  assert.equal(monitor.lastCollectedAt("ram"), at, "only real data moves it");
+});
+
+test("success rules per domain, and the snapshot carries no success timestamps", () => {
+  const monitor = new SparkMonitor(spark());
+  const ok = (domain, result) => monitor._domainSucceeded(domain, result);
+  assert.equal(ok("storage", [{ device: "x" }]), true);
+  assert.equal(ok("storage", []), false);
+  assert.equal(ok("network", { interfaces: [{ name: "eth0" }] }), true);
+  assert.equal(ok("network", { interfaces: [] }), false);
+  assert.equal(ok("memory", { total: 128 }), true);
+  assert.equal(ok("memory", { total: 0 }), false);
+  assert.equal(ok("llm", []), true); // an engine that is down is still a successful probe
+  assert.equal(ok("llm", undefined), false);
+  assert.equal(ok("hermes", {}), false);
+  const text = JSON.stringify(monitor.snapshot());
+  assert.equal(/lastSuccess|collectedAt|last_success/.test(text), false);
+});
+
+test("a domain that is no longer polled is not reported, and RoCE is stamped with its own sample time", async () => {
+  const monitor = new SparkMonitor({ ...spark(), llmMonitoring: true });
+  monitor._running = true;
+  monitor.collector.collectStorage = async () => [{ device: "nvme0", label: "/", used: 1, total: 2, available: 1, percentage: 50 }];
+  monitor.collector.collectNetwork = async () => ({ primaryInterface: "eth0", linkSpeedMbps: 1000, interfaces: [{ name: "eth0", rxSpeed: 0, txSpeed: 0, ip: "10.0.0.1", operstate: "up", disabled: false }], wolMac: null });
+  monitor.collector.collectRoce = async () => ({ available: true, sampledAt: 1234, devices: [] });
+  await monitor._pollDomain("storage");
+  await monitor._pollDomain("network");
+  assert.equal(monitor.lastSuccess().roce, 1234); // not Date.now()
+  assert.ok(monitor.lastSuccess().storage > 0);
+  monitor.spark.storagePollDisabled = true;
+  assert.equal("storage" in monitor.lastSuccess(), false);
+  monitor.spark.storagePollDisabled = false;
+  await monitor.refreshDomain("storage");
+  assert.ok(monitor.lastSuccess().storage > 0); // a manual refresh counts
+  monitor.spark.isLocal = false;
+  monitor._invalidateSshMetrics();
+  assert.equal("storage" in monitor.lastSuccess(), false);
+  assert.equal("network" in monitor.lastSuccess(), false);
+});
+
+test("a GPU hovering at the warning threshold raises one event, not one per crossing", () => {
+  const monitor = new SparkMonitor(spark());
+  const events = [];
+  monitor._onEvent = (e) => events.push(e);
+  let now = 1_000_000;
+  monitor._healthNow = () => now;
+  const reading = (temperature) => {
+    monitor._metrics.gpu = { ...validGpu(temperature) };
+    monitor._updateHealth("gpu");
+  };
+
+  reading(70); // baseline: nothing yet, and no event for the first evaluation
+  assert.equal(events.length, 0);
+  // 20 minutes of a reading that flips between 84 and 85 every 20 s
+  for (let i = 0; i < 60; i++) {
+    now += 20_000;
+    reading(i % 2 === 0 ? 85 : 84);
+  }
+  const hot = events.filter((e) => e.type === "health.thermal");
+  const cleared = events.filter((e) => e.type === "health.cleared");
+  assert.equal(hot.length, 1);
+  assert.equal(cleared.length, 0);
+  assert.equal(monitor._health.some((f) => f.id === "thermal"), true);
+});
+
+test("a finding clears once its rule has stayed quiet for the hold time, and a new event follows a real second episode", () => {
+  const monitor = new SparkMonitor(spark());
+  const events = [];
+  monitor._onEvent = (e) => events.push(e);
+  let now = 1_000_000;
+  monitor._healthNow = () => now;
+  const reading = (temperature) => {
+    monitor._metrics.gpu = { ...validGpu(temperature) };
+    monitor._updateHealth("gpu");
+  };
+  reading(70);
+  now += 1000; reading(86); // episode 1 begins
+  now += 1000; reading(60);
+  now += HEALTH_CLEAR_HOLD_MS - 2000; reading(60);
+  assert.equal(monitor._health.some((f) => f.id === "thermal"), true); // still held
+  now += 3000; reading(60);
+  assert.equal(monitor._health.some((f) => f.id === "thermal"), false); // hold over
+  assert.equal(events.filter((e) => e.type === "health.cleared").length, 1);
+  now += 1000; reading(88); // episode 2
+  assert.equal(events.filter((e) => e.type === "health.thermal").length, 2);
+});
+
+test("fresh LLM progress clears a held low-power warning immediately, but not thermal findings", async (t) => {
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(llmDaily, "record", () => {});
+  const events = [];
+  const monitor = new SparkMonitor({ ...spark(), llmMonitoring: true, llmPorts: [8888] }, {
+    onEvent: (event) => events.push(event),
+  });
+  monitor._running = true;
+  let output = 100;
+  monitor.llmProbes.get(8888).probe = async () => ({
+    port: 8888, available: true, backend: "tensorfold", modelId: "m",
+    totalOutputTokens: output, generationTps: 0, prefillTps: 0,
+  });
+  monitor.collector.collectGpu = async () => ({
+    ...validGpu(88), usage: 96, power: { draw: 9 },
+  });
+  await monitor._pollDomain("llm");
+  for (let i = 0; i < LOW_POWER_STREAK; i++) {
+    now += 2000;
+    await monitor._pollDomain("gpu");
+  }
+  assert.deepEqual(monitor.snapshot().health.map((f) => f.id).sort(), ["low-power", "thermal"]);
+  output += 10;
+  await monitor._pollDomain("llm");
+  assert.deepEqual(monitor.snapshot().health.map((f) => f.id), ["thermal"]);
+  assert.equal(events.filter((e) => e.type === "health.cleared").length, 1);
+
+  // Re-reading the same snapshot on GPU polls must not renew evidence of progress.
+  now += LOW_POWER_PROGRESS_MS;
+  await monitor._pollDomain("gpu");
+  assert.deepEqual(monitor.snapshot().health.map((f) => f.id).sort(), ["low-power", "thermal"]);
+});
+
+test("only paired workers inherit fresh progress from an online head", async (t) => {
+  let now = 1_000_000;
+  t.mock.method(Date, "now", () => now);
+  t.mock.method(llmDaily, "record", () => {});
+  const head = new SparkMonitor({ ...spark(), id: "head", role: "head", llmMonitoring: true, llmPorts: [8888] });
+  head.online = true;
+  head._running = true;
+  let position = 2048;
+  head.llmProbes.get(8888).probe = async () => ({
+    port: 8888, available: true, backend: "tensorfold", modelId: "m",
+    prefillProgressTokens: position, generationTps: 0, prefillTps: 0,
+  });
+  const worker = (id, workerHeadId, role = "worker") => {
+    const monitor = new SparkMonitor({
+      ...spark(), id, role, workerHeadId, llmMonitoring: role !== "worker", llmPorts: [8888],
+    }, { resolveHeadLlmProgressAt: (headId) => headId === "head" ? head.llmProgressAt() : null });
+    monitor._running = true;
+    monitor.collector.collectGpu = async () => ({
+      ...validGpu(), usage: 96, power: { draw: 9 },
+    });
+    return monitor;
+  };
+  const paired = worker("paired", "head");
+  const unrelated = worker("unrelated", "missing");
+  const local = worker("local", "head", "standalone");
+  const workers = [paired, unrelated, local];
+  await head._pollDomain("llm");
+  for (let i = 0; i < LOW_POWER_STREAK; i++) {
+    now += 2000;
+    for (const monitor of workers) await monitor._pollDomain("gpu");
+  }
+  assert.ok(workers.every((m) => m.snapshot().health.some((f) => f.id === "low-power")));
+  position += 2048;
+  await head._pollDomain("llm");
+  for (const monitor of workers) await monitor._pollDomain("gpu");
+  assert.deepEqual(paired.snapshot().health, []);
+  assert.ok(unrelated.snapshot().health.some((f) => f.id === "low-power"));
+  assert.ok(local.snapshot().health.some((f) => f.id === "low-power"));
+
+  head.online = false;
+  await paired._pollDomain("gpu");
+  assert.ok(paired.snapshot().health.some((f) => f.id === "low-power"));
 });

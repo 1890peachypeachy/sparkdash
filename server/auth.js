@@ -163,6 +163,13 @@ export function createAuthMiddleware() {
       if (allowOpenRemote()) return next();
       return res.status(403).json({ error: "Remote access requires SPARKDASH_TOKEN" });
     }
+    // The built frontend must load before the app can ask for the token: the
+    // SPA shell and its hashed assets carry no secrets, so on a tokened remote
+    // bind they answer without auth (the loopback bind already serves every
+    // GET open). API routes and the WebSocket stay token-gated; the app then
+    // authenticates its own calls from localStorage (src/api/authToken.ts).
+    // Case-insensitive, like Express routing: /API/sparks reaches the same handler as /api/sparks.
+    if (!mutating && !/^\/(api|ws|metrics)(\/|$)/i.test(req.path || "")) return next();
     const result = authenticate(req);
     if (!result.ok) return res.status(result.status).json({ error: result.error });
     next();

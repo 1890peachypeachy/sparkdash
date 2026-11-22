@@ -21,9 +21,10 @@ function withEnv(env, fn) {
   }
 }
 
-function req({ bearer, query, method = "GET" } = {}) {
+function req({ bearer, query, method = "GET", path = "/api/sparks" } = {}) {
   return {
     method,
+    path,
     headers: bearer ? { authorization: `Bearer ${bearer}` } : {},
     query: query ? { token: query } : {},
   };
@@ -54,6 +55,20 @@ test("token configured: required, and only the right token authenticates", () =>
     assert.deepEqual(authStatus(req({ bearer: "s3cret" })), { tokenRequired: true, authenticated: true });
     // The WebSocket passes the token as ?token=, so the status must accept it too.
     assert.deepEqual(authStatus(req({ query: "s3cret" })), { tokenRequired: true, authenticated: true });
+  });
+});
+
+test("tokened remote bind: the frontend shell and assets load without a token; api and ws stay gated", () => {
+  withEnv({ SPARKDASH_TOKEN: "s3cret", BIND_HOST: "0.0.0.0" }, () => {
+    // The SPA cannot ask for the token until its shell and bundles are served.
+    for (const path of ["/", "/assets/index-0FP2dord.js", "/tokens", "/favicon.ico"]) {
+      assert.equal(passesMiddleware(req({ path })), true, `${path} should pass without a token`);
+    }
+    for (const path of ["/api/sparks", "/api/settings", "/ws", "/metrics"]) {
+      assert.equal(passesMiddleware(req({ path })), false, `${path} should be gated`);
+      assert.equal(passesMiddleware(req({ path, bearer: "wrong" })), false, `${path} should reject a wrong token`);
+      assert.equal(passesMiddleware(req({ path, bearer: "s3cret" })), true, `${path} should pass with the token`);
+    }
   });
 });
 
@@ -233,5 +248,19 @@ test("a non-loopback bind is unaffected by Host and Origin", () => {
     assert.equal(passesMiddleware(browser("rebound.example:5555")), true);
     assert.equal(passesMiddleware(browser("10.0.0.5:5555", { origin: "https://evil.example", method: "POST" })), true);
     assert.equal(authorizeUpgrade(browser("10.0.0.5:5555", { origin: "https://evil.example" })), true);
+  });
+});
+
+test("tokened remote bind: the API gate ignores path case, as Express routing does", () => {
+  withEnv({ SPARKDASH_TOKEN: "s3cret", BIND_HOST: "0.0.0.0" }, () => {
+    for (const path of ["/API/sparks", "/Api/Sparks", "/METRICS", "/Ws"]) {
+      assert.equal(passesMiddleware(req({ path })), false, `${path} without a token`);
+      assert.equal(passesMiddleware(req({ path, bearer: "s3cret" })), true, `${path} with the token`);
+    }
+    // A state-changing request was already gated; it must stay that way.
+    assert.equal(passesMiddleware(req({ path: "/API/sparks/shutdown-all", method: "POST" })), false);
+    // The SPA shell and its hashed assets still load before the app has a token.
+    assert.equal(passesMiddleware(req({ path: "/" })), true);
+    assert.equal(passesMiddleware(req({ path: "/assets/index-abc123.js" })), true);
   });
 });

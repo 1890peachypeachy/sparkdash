@@ -383,6 +383,16 @@ export function TokensIcon({ className = "" }: { className?: string }) {
   );
 }
 
+/** Shield with a check: security scans. */
+export function ShieldIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M12 3 4.5 6v5.5c0 4.4 3.1 8.1 7.5 9.5 4.4-1.4 7.5-5.1 7.5-9.5V6L12 3Z" />
+      <path d="m9 12 2.2 2.2L15.2 10" />
+    </svg>
+  );
+}
+
 export function ListIcon({ className = "" }: { className?: string }) {
   return (
     <svg {...baseProps(className)}>
@@ -399,6 +409,15 @@ export function GaugeIcon({ className = "" }: { className?: string }) {
       <path d="M4.9 19a9 9 0 1 1 14.2 0" />
       <path d="m12 14 4-5" />
       <circle cx="12" cy="14" r="1" />
+    </svg>
+  );
+}
+
+/** Thermometer: GPU temperatures (Temps page). */
+export function ThermometerIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M14 14.76V5a2 2 0 0 0-4 0v9.76a4 4 0 1 0 4 0" />
     </svg>
   );
 }
@@ -466,6 +485,103 @@ export function XLogoIcon({ className = "" }: { className?: string }) {
   return (
     <svg width={14} height={14} viewBox="0 0 24 24" fill="currentColor" aria-hidden className={className}>
       <path d="M18.244 2H21.5l-7.1 8.12L22.8 22h-6.55l-5.13-6.7L5.2 22H1.94l7.6-8.68L1.5 2h6.72l4.64 6.13L18.244 2zm-1.14 18h1.8L7.3 3.9H5.37L17.1 20z" />
+    </svg>
+  );
+}
+
+/** Stacked coins — used for the Cost compare page. */
+export function CoinsIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden className={className}>
+      <circle cx="8.5" cy="8.5" r="5.5" />
+      <path d="M14.5 4.6a5.5 5.5 0 1 1-3.9 9.4" />
+      <path d="M7.5 18.4a5.5 5.5 0 1 0 7-7" />
+    </svg>
+  );
+}
+
+export function KeyIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg width={16} height={16} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden className={className}>
+      <circle cx="7.5" cy="15.5" r="4.5" />
+      <path d="M10.7 12.3 20 3" />
+      <path d="M16 7l3 3" />
+      <path d="M18 5l2 2" />
+    </svg>
+  );
+}
+
+export function TrashIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M3 6h18" />
+      <path d="M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2" />
+      <path d="m6 6 1 14a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-14" />
+      <path d="M10 11v6M14 11v6" />
+    </svg>
+  );
+}
+
+export function FolderIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M3 7a2 2 0 0 1 2-2h4l2 2.5h8a2 2 0 0 1 2 2V17a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z" />
+    </svg>
+  );
+}
+
+export function FileIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z" />
+      <path d="M14 3v5h5" />
+    </svg>
+  );
+}
+
+export function LockIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <rect x="4.5" y="10.5" width="15" height="10" rx="2" />
+      <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" />
+    </svg>
+  );
+}
+
+export function LinkIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M10 14a4 4 0 0 0 5.66 0l3-3a4 4 0 0 0-5.66-5.66l-1 1" />
+      <path d="M14 10a4 4 0 0 0-5.66 0l-3 3a4 4 0 0 0 5.66 5.66l1-1" />
+    </svg>
+  );
+}
+
+/** A shipping container, for Docker. */
+export function BoxIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="m12 3 8.5 4.5v9L12 21l-8.5-4.5v-9z" />
+      <path d="m3.5 7.5 8.5 4.5 8.5-4.5M12 12v9" />
+    </svg>
+  );
+}
+
+export function CopyIcon({ className = "" }: { className?: string }) {
+  return (
+    <svg {...baseProps(className)}>
+      <rect x="9" y="9" width="11" height="11" rx="2" />
+      <path d="M5 15V6a2 2 0 0 1 2-2h9" />
+    </svg>
+  );
+}
+
+export function SparkleIcon({ className }: IconProps) {
+  return (
+    <svg {...baseProps(className)}>
+      <path d="M12 3l1.8 4.9L18.7 9.7l-4.9 1.8L12 16.4l-1.8-4.9L5.3 9.7l4.9-1.8z" />
+      <path d="M19 15l.7 1.8 1.8.7-1.8.7L19 20l-.7-1.8-1.8-.7 1.8-.7z" />
+      <path d="M5 2.5l.5 1.3 1.3.5-1.3.5L5 6.1l-.5-1.3-1.3-.5 1.3-.5z" />
     </svg>
   );
 }

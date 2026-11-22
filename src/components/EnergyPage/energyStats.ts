@@ -1,4 +1,6 @@
 import type { EnergyHistoryRow } from "../../api/types";
+import { tzOffsetMinutes } from "../../shared/timeZone";
+import { tariffPriceAt, type EnergyTariff } from "../../shared/energyTariff";
 
 /**
  * Pure maths for the Fleet energy page: range selection, local-calendar grouping,
@@ -9,6 +11,8 @@ import type { EnergyHistoryRow } from "../../api/types";
  * Data semantics (mirrors server/energy/FleetEnergyTracker.js):
  *  - nodeWh / nodeCoverageMs: per node, while THAT node reported fresh telemetry.
  *  - fleetEnergyWh / fleetCoverageMs / coveredOutputTokens: only while EVERY node was fresh.
+ *  - avgReportingWatts / reportingEnergyWh / reportingCoverageMs: the sum over the nodes that
+ *    reported, which the fleet line and its "n/m reporting" label are drawn from.
  *  - Hours with no coverage at all are omitted by the server (gaps).
  */
 
@@ -21,11 +25,23 @@ export const RANGE_DAYS: Record<EnergyRange, number> = { "24h": 1, "7d": 7, "14d
 /** Minutes east of UTC for the instant `ms` (e.g. +120 for CEST). */
 export type TzOffsetFn = (ms: number) => number;
 
-/** Offset of the viewer's browser time zone at `ms`. */
-export const browserTzOffset: TzOffsetFn = (ms) => -new Date(ms).getTimezoneOffset();
+/** Offset of the chart time zone at `ms`: the Settings time zone, else the viewer's browser's. */
+export const browserTzOffset: TzOffsetFn = (ms) => tzOffsetMinutes(ms);
 
 /** Fixed-offset helper, mostly for tests. */
 export const fixedTz = (minutes: number): TzOffsetFn => () => minutes;
+
+/** Node colours in stack order (largest consumer first). */
+export const NODE_COLORS = [
+  "var(--color-accent)",
+  "var(--color-info)",
+  "var(--color-violet)",
+  "var(--color-success)",
+  "var(--color-warning)",
+  "var(--color-danger)",
+  "var(--color-muted-strong)",
+  "var(--color-faint)",
+];
 
 /** Rows need at least this much coverage before an hour counts for "peak". */
 const MIN_PEAK_COVERAGE_MS = 10 * 60_000;
@@ -130,6 +146,11 @@ export interface EnergyBucket {
   kwh: number;
   fleetWh: number;
   fleetCoverageMs: number;
+  /** Energy of the reporting series (sum over the nodes that reported), which charts draw. */
+  reportingWh: number;
+  reportingCoverageMs: number;
+  /** Fewest nodes that series covered in the bucket; null = no reporting data. */
+  reportingNodeCount: number | null;
   /** Time in the bucket that could have been covered (hours elapsed in range). */
   expectedMs: number;
   outputTokens: number;
@@ -137,6 +158,10 @@ export interface EnergyBucket {
   avgWatts: number | null;
   /** Wh per 1,000 generated tokens, null without token data. */
   whPer1kTokens: number | null;
+  /** What the bucket's energy cost, each hour at its own price; null without a price or data. */
+  cost: number | null;
+  /** Average price per kWh over the bucket's energy (an empty hour shows the hour's price). */
+  pricePerKwh: number | null;
   hasData: boolean;
 }
 
@@ -153,7 +178,8 @@ export function buildBuckets(
   rows: readonly EnergyHistoryRow[],
   win: RangeWindow,
   mode: "hour" | "day",
-  tz: TzOffsetFn
+  tz: TzOffsetFn,
+  price: HourPrice | null = null
 ): EnergyBucket[] {
   const from = mode === "hour" ? win.startMs : win.windowStartMs;
   const byKey = new Map<string, EnergyBucket>();
@@ -172,11 +198,16 @@ export function buildBuckets(
         kwh: 0,
         fleetWh: 0,
         fleetCoverageMs: 0,
+        reportingWh: 0,
+        reportingCoverageMs: 0,
+        reportingNodeCount: null,
         expectedMs: 0,
         outputTokens: 0,
         coveredTokens: 0,
         avgWatts: null,
         whPer1kTokens: null,
+        cost: null,
+        pricePerKwh: null,
         hasData: false,
       };
       byKey.set(key, b);
@@ -187,23 +218,47 @@ export function buildBuckets(
   for (let t = floorHour(from); t <= win.endHourMs; t += HOUR_MS) {
     ensure(t).expectedMs += t === win.endHourMs ? Math.max(0, Math.min(HOUR_MS, win.nowMs - t)) : HOUR_MS;
   }
+  const costs = new Map<EnergyBucket, { sum: number; unpriced: boolean }>();
   for (const r of rows) {
     if (r.t < floorHour(from) || r.t > win.endHourMs) continue;
     const b = ensure(r.t);
+    let rowKwh = 0;
     for (const [id, wh] of Object.entries(r.nodeWh)) {
       if (!Number.isFinite(wh) || wh <= 0) continue;
       b.nodeKwh[id] = (b.nodeKwh[id] || 0) + wh / 1000;
       b.kwh += wh / 1000;
+      rowKwh += wh / 1000;
+    }
+    if (price) {
+      const c = costs.get(b) ?? { sum: 0, unpriced: false };
+      const p = price(r.t);
+      if (p == null) c.unpriced ||= rowKwh > 0;
+      else c.sum += rowKwh * p;
+      costs.set(b, c);
     }
     b.fleetWh += r.fleetEnergyWh || 0;
     b.fleetCoverageMs += r.fleetCoverageMs || 0;
+    // The reporting series, with the full-fleet figures as the fallback for older records.
+    const reportingWh = r.reportingEnergyWh ?? r.fleetEnergyWh ?? 0;
+    const reportingCoverageMs = r.reportingCoverageMs ?? r.fleetCoverageMs ?? 0;
+    b.reportingWh += reportingWh;
+    b.reportingCoverageMs += reportingCoverageMs;
+    if (reportingCoverageMs > 0) {
+      const count = r.reportingNodeCount ?? Object.keys(r.nodeWh).length;
+      b.reportingNodeCount =
+        b.reportingNodeCount == null ? count : Math.min(b.reportingNodeCount, count);
+    }
     b.outputTokens += r.outputTokens || 0;
     b.coveredTokens += r.coveredOutputTokens || 0;
     b.hasData = true;
   }
   for (const b of order) {
-    b.avgWatts = b.fleetCoverageMs > 0 ? b.fleetWh / (b.fleetCoverageMs / HOUR_MS) : null;
+    // The chart's line is the reporting series; efficiency stays on the full-fleet one.
+    b.avgWatts = b.reportingCoverageMs > 0 ? b.reportingWh / (b.reportingCoverageMs / HOUR_MS) : null;
     b.whPer1kTokens = whPer1kTokens(b.fleetWh, b.coveredTokens);
+    const c = costs.get(b);
+    b.cost = price && b.hasData && c && !c.unpriced ? c.sum : null;
+    b.pricePerKwh = b.cost != null && b.kwh > 0 ? b.cost / b.kwh : price && mode === "hour" ? price(b.startMs) : null;
   }
   return order;
 }
@@ -255,12 +310,39 @@ export function costFor(kwh: number, price: number | null | undefined): number |
   return price != null && Number.isFinite(price) && price >= 0 ? kwh * price : null;
 }
 
+/** Price per kWh of the hour starting at `hourStartMs`, or null when that hour has no price. */
+export type HourPrice = (hourStartMs: number) => number | null;
+
+/**
+ * The Settings tariff as a price per hour in the chart time zone, or null when no
+ * price is set at all. A flat tariff (or time of use without periods) is one price.
+ */
+export function tariffHourPrice(tariff: EnergyTariff, tz: TzOffsetFn): HourPrice | null {
+  if (tariff.mode !== "tou" || tariff.periods.length === 0) {
+    const base = tariff.base;
+    return base != null && Number.isFinite(base) && base >= 0 ? () => base : null;
+  }
+  return (ms) => {
+    const d = wall(ms, tz);
+    return tariffPriceAt(tariff, d.getUTCHours(), d.getUTCDay());
+  };
+}
+
+/**
+ * Totals for the range. `price` is a flat price per kWh, or an HourPrice: then every
+ * hour's energy is priced at that hour's rate, and a cost is null while any hour that
+ * used energy has no price.
+ */
 export function summarize(
   rows: readonly EnergyHistoryRow[],
   win: RangeWindow,
   nodeIds: readonly string[],
-  price: number | null | undefined
+  price: number | HourPrice | null | undefined
 ): EnergySummary {
+  const hourPrice = typeof price === "function" ? price : null;
+  const flat = typeof price === "function" ? null : price;
+  const nodeCost = new Map<string, number>();
+  const unpriced = new Set<string>();
   const inRange = rowsInRange(rows, win.startMs, win.endHourMs);
   const nodeWh = new Map<string, number>();
   const nodeCov = new Map<string, number>();
@@ -275,8 +357,13 @@ export function summarize(
     nodeCov.set(id, 0);
   }
   for (const r of inRange) {
+    const p = hourPrice ? hourPrice(r.t) : null;
     for (const [id, wh] of Object.entries(r.nodeWh)) {
-      if (Number.isFinite(wh)) nodeWh.set(id, (nodeWh.get(id) || 0) + wh);
+      if (!Number.isFinite(wh)) continue;
+      nodeWh.set(id, (nodeWh.get(id) || 0) + wh);
+      if (!hourPrice) continue;
+      if (p != null) nodeCost.set(id, (nodeCost.get(id) || 0) + (wh / 1000) * p);
+      else if (wh > 0) unpriced.add(id);
     }
     for (const [id, ms] of Object.entries(r.nodeCoverageMs)) {
       if (!Number.isFinite(ms)) continue;
@@ -310,12 +397,14 @@ export function summarize(
         peakAtMs: pk?.atMs ?? null,
         coverageMs: cov,
         coverage: win.windowMs > 0 ? Math.min(1, cov / win.windowMs) : 0,
-        cost: costFor(wh / 1000, price),
+        cost: hourPrice ? (unpriced.has(id) ? null : nodeCost.get(id) || 0) : costFor(wh / 1000, flat),
       };
     })
     .sort((a, b) => b.kwh - a.kwh);
   const dataSpanDays = win.windowMs / DAY_MS;
-  const cost = costFor(kwh, price);
+  const cost = hourPrice
+    ? unpriced.size > 0 ? null : [...nodeCost.values()].reduce((s, v) => s + v, 0)
+    : costFor(kwh, flat);
   return {
     kwh,
     avgWatts: fleetCov > 0 ? fleetWh / (fleetCov / HOUR_MS) : null,
@@ -365,6 +454,8 @@ export interface InsightContext {
   price: number | null | undefined;
   currency: string;
   nodeName: (id: string) => string;
+  /** UI translation callback; omitted for the pure-logic English test surface. */
+  t?: (key: string, options?: Record<string, unknown>) => string;
 }
 
 const fmtNum = (v: number, digits = 1) => v.toLocaleString("en-US", { minimumFractionDigits: digits, maximumFractionDigits: digits });
@@ -396,7 +487,8 @@ const isNight = (h: number) => h >= NIGHT_START || h < NIGHT_END;
 
 /** Plain-English observations; each is only produced when the data supports it. */
 export function buildInsights(ctx: InsightContext): string[] {
-  const { summary, buckets, rows, tz, price, currency, nodeName } = ctx;
+  const { summary, buckets, rows, tz, price, currency, nodeName, t } = ctx;
+  const text = (key: string, options: Record<string, unknown>, fallback: string) => t ? t(key, options) : fallback;
   const out: string[] = [];
   if (!summary.hasData) return out;
 
@@ -404,20 +496,13 @@ export function buildInsights(ctx: InsightContext): string[] {
   if (summary.nodes.filter((n) => n.kwh > 0).length >= 2 && top && top.kwh > 0) {
     const second = summary.nodes[1];
     const spread = second && second.kwh > 0 ? top.kwh / second.kwh : null;
-    out.push(
-      `${nodeName(top.id)} uses the most energy: ${formatKwh(top.kwh)} kWh, ${Math.round(top.share * 100)}% of the fleet total` +
-        (top.avgWatts != null ? `, averaging ${formatWatts(top.avgWatts)} while reporting.` : ".") +
-        (spread != null && spread >= 1.5 ? ` That is ${fmtNum(spread, 1)}x the next node.` : "")
-    );
+    out.push(text("energy.insightTop", { node: nodeName(top.id), kwh: formatKwh(top.kwh), share: Math.round(top.share * 100), wattsSuffix: top.avgWatts != null ? `, averaging ${formatWatts(top.avgWatts)} while reporting.` : ".", spreadSuffix: spread != null && spread >= 1.5 ? ` That is ${fmtNum(spread, 1)}x the next node.` : "" }, `${nodeName(top.id)} uses the most energy: ${formatKwh(top.kwh)} kWh, ${Math.round(top.share * 100)}% of the fleet total${top.avgWatts != null ? `, averaging ${formatWatts(top.avgWatts)} while reporting.` : "."}${spread != null && spread >= 1.5 ? ` That is ${fmtNum(spread, 1)}x the next node.` : ""}`));
   }
 
   if (summary.peak) {
     const where = formatLocalHour(summary.peak.atMs, tz);
     const low = lowestHour(rows, summary, summary.peak.atMs);
-    out.push(
-      `The highest-draw hour was ${where} (local) at ${formatWatts(summary.peak.watts)}` +
-        (low ? `; the lowest was ${formatLocalHour(low.atMs, tz)} at ${formatWatts(low.watts)}.` : ".")
-    );
+    out.push(text("energy.insightPeak", { highAt: where, highWatts: formatWatts(summary.peak.watts), lowSuffix: low ? `; the lowest was ${formatLocalHour(low.atMs, tz)} at ${formatWatts(low.watts)}.` : "." }, `The highest-draw hour was ${where} (local) at ${formatWatts(summary.peak.watts)}${low ? `; the lowest was ${formatLocalHour(low.atMs, tz)} at ${formatWatts(low.watts)}.` : "."}`));
   }
 
   if (ctx.mode === "day") {
@@ -425,9 +510,7 @@ export function buildInsights(ctx: InsightContext): string[] {
     if (days.length >= 3) {
       const best = days.reduce((a, b) => (b.kwh > a.kwh ? b : a));
       const avg = days.reduce((s, b) => s + b.kwh, 0) / days.length;
-      out.push(
-        `${best.title} was the highest-use day with ${formatKwh(best.kwh)} kWh, ${Math.round((best.kwh / avg - 1) * 100)}% above the ${fmtNum(avg, 1)} kWh average of well-covered days.`
-      );
+      out.push(text("energy.insightDay", { day: best.title, kwh: formatKwh(best.kwh), above: Math.round((best.kwh / avg - 1) * 100), average: fmtNum(avg, 1) }, `${best.title} was the highest-use day with ${formatKwh(best.kwh)} kWh, ${Math.round((best.kwh / avg - 1) * 100)}% above the ${fmtNum(avg, 1)} kWh average of well-covered days.`));
     }
   }
 
@@ -435,28 +518,20 @@ export function buildInsights(ctx: InsightContext): string[] {
   if (dn) {
     const diff = (dn.day - dn.night) / dn.day;
     if (Math.abs(diff) >= 0.05) {
-      out.push(
-        diff > 0
-          ? `Overnight (22:00 to 06:00 local) the fleet averaged ${formatWatts(dn.night)}, ${Math.round(diff * 100)}% lower than the ${formatWatts(dn.day)} daytime average.`
-          : `Overnight (22:00 to 06:00 local) the fleet averaged ${formatWatts(dn.night)}, ${Math.round(-diff * 100)}% higher than the ${formatWatts(dn.day)} daytime average.`
-      );
+      out.push(text(diff > 0 ? "energy.insightNightLower" : "energy.insightNightHigher", { night: formatWatts(dn.night), change: Math.round(Math.abs(diff) * 100), day: formatWatts(dn.day) }, diff > 0 ? `Overnight (22:00 to 06:00 local) the fleet averaged ${formatWatts(dn.night)}, ${Math.round(diff * 100)}% lower than the ${formatWatts(dn.day)} daytime average.` : `Overnight (22:00 to 06:00 local) the fleet averaged ${formatWatts(dn.night)}, ${Math.round(-diff * 100)}% higher than the ${formatWatts(dn.day)} daytime average.`));
     } else {
-      out.push(`Draw is steady around the clock: ${formatWatts(dn.night)} overnight versus ${formatWatts(dn.day)} during the day.`);
+      out.push(text("energy.insightSteady", { night: formatWatts(dn.night), day: formatWatts(dn.day) }, `Draw is steady around the clock: ${formatWatts(dn.night)} overnight versus ${formatWatts(dn.day)} during the day.`));
     }
   }
 
   if (summary.cost != null && summary.coveredHours >= 12 && price != null) {
     const perWeek = ((summary.kwh / (summary.windowMs / DAY_MS)) * 7) * price;
-    out.push(
-      `At ${currency}${fmtNum(price, price < 1 ? 3 : 2)} per kWh, this pace would cost about ${formatMoney(perWeek, currency)} per week. This is a rough extrapolation from the data recorded so far, not a forecast.`
-    );
+    out.push(text("energy.insightCost", { price: `${currency}${fmtNum(price, price < 1 ? 3 : 2)}`, weekly: formatMoney(perWeek, currency) }, `At ${currency}${fmtNum(price, price < 1 ? 3 : 2)} per kWh, this pace would cost about ${formatMoney(perWeek, currency)} per week. This is a rough extrapolation from the data recorded so far, not a forecast.`));
   }
 
   if (summary.whPer1kTokens != null && summary.coveredTokens >= 1000) {
     const tokensPerKwh = 1_000_000 / summary.whPer1kTokens;
-    out.push(
-      `The fleet generated about ${formatTokensPerKwh(tokensPerKwh)} output tokens per kWh (${fmtNum(summary.whPer1kTokens, summary.whPer1kTokens < 10 ? 2 : 1)} Wh per 1,000 tokens), counting idle time in the same hours.`
-    );
+    out.push(text("energy.insightEfficiency", { tokens: formatTokensPerKwh(tokensPerKwh), wh: fmtNum(summary.whPer1kTokens, summary.whPer1kTokens < 10 ? 2 : 1) }, `The fleet generated about ${formatTokensPerKwh(tokensPerKwh)} output tokens per kWh (${fmtNum(summary.whPer1kTokens, summary.whPer1kTokens < 10 ? 2 : 1)} Wh per 1,000 tokens), counting idle time in the same hours.`));
   }
   return out.slice(0, 6);
 }

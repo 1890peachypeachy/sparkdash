@@ -161,12 +161,22 @@ test("LlmTokenLedger: daily buckets credit deltas and serve ranged snapshots", (
   const all = ledger.snapshot("all", d2).series[0];
   assert.equal(all.models[0].completionTokens, 200);
 
-  // "today" (day of d2) only includes the d2 delta.
+  // "today" is a rolling last-24-hours window (hourly buckets), so the d1
+  // delta (23:00 UTC, 11 h before d2) is included.
   const today = ledger.snapshot("today", d2).series[0];
   assert.equal(today.models.length, 1);
-  assert.equal(today.models[0].completionTokens, 100);
-  assert.equal(today.models[0].promptTokens, 20);
+  assert.equal(today.models[0].completionTokens, 200);
+  assert.equal(today.models[0].promptTokens, 30);
   assert.equal(today.models[0].lastSeenAt, null);
+
+  // 6h window: d1 (11 h before d2) falls outside, only the d2 delta counts.
+  const six = ledger.snapshot("6h", d2).series[0];
+  assert.equal(six.models[0].completionTokens, 100);
+  assert.equal(six.models[0].promptTokens, 20);
+
+  // 1h window: same — only the d2 delta.
+  const one = ledger.snapshot("1h", d2).series[0];
+  assert.equal(one.models[0].completionTokens, 100);
 
   // 7d/14d/30d windows include both days.
   const seven = ledger.snapshot("7d", d2).series[0];
@@ -210,6 +220,163 @@ test("LlmTokenLedger: backends without the split keep cachedTokens at 0", () => 
   const s = ledger.snapshot().series[0];
   assert.equal(s.models[0].cachedTokens, 0);
   assert.equal(s.models[0].promptTokens, 1000);
+});
+
+test("LlmTokenLedger: an engine that never reports the split is flagged, not read as 0 % hits", () => {
+  const ledger = tmpLedger();
+  const t0 = Date.UTC(2026, 9, 28, 12, 0, 0);
+  ledger.record([obs("spark-a", 8888, "org/a", 100, 1000)], t0);
+  ledger.record([obs("spark-a", 8888, "org/a", 150, 2000)], t0 + 60_000);
+  const s = ledger.snapshot().series[0];
+  assert.equal(s.models[0].cachedTokens, 0);
+  assert.equal(s.models[0].cacheReported, false);
+  assert.equal(s.totals.cacheReported, false);
+  // Range buckets and the detailed history carry the same verdict.
+  assert.equal(ledger.snapshot("today", t0 + 120_000).series[0].models[0].cacheReported, false);
+  const row = ledger.history(t0 + 120_000).hour.at(-1);
+  assert.equal(row.cacheReported, false);
+});
+
+test("LlmTokenLedger: prompt tokens credited without a cached counter are counted as unreported, not computed", () => {
+  // An engine that starts publishing the counter mid-day: 2000 prompt tokens arrive before the
+  // ledger can measure a cached delta (the first sample with the counter only seeds it), 1000 after.
+  const ledger = tmpLedger();
+  const t0 = Date.UTC(2026, 9, 28, 12, 0, 0);
+  ledger.record([obs("spark-a", 8888, "org/a", 100, 1000)], t0);
+  ledger.record([obs("spark-a", 8888, "org/a", 150, 2000)], t0 + 60_000);
+  ledger.record([obs("spark-a", 8888, "org/a", 200, 3000, 500)], t0 + 120_000);
+  ledger.record([obs("spark-a", 8888, "org/a", 250, 4000, 1300)], t0 + 180_000);
+  const now = t0 + 240_000;
+  const want = { promptTokens: 3000, cachedTokens: 800, unreportedPromptTokens: 2000 };
+  const pick = (r) => ({ promptTokens: r.promptTokens, cachedTokens: r.cachedTokens, unreportedPromptTokens: r.unreportedPromptTokens });
+  for (const range of ["all", "today", "7d"]) {
+    const s = ledger.snapshot(range, now).series[0];
+    assert.deepEqual(pick(s.models[0]), want, range);
+    assert.deepEqual(pick(s.totals), want, `${range} totals`);
+  }
+  const h = ledger.history(now);
+  assert.deepEqual(pick(h.day.at(-1)), want);
+  assert.deepEqual(pick(h.hour.at(-1)), want);
+});
+
+test("LlmTokenLedger: the unreported count survives a restart; rows written before it fall back to their flag", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-tokens-"));
+  const file = path.join(dir, "llm-token-totals.json");
+  const t0 = Date.UTC(2026, 9, 28, 12, 0, 0);
+  const first = new LlmTokenLedger(file);
+  // a reported row (the counter arrived later) with 1000 tokens still unknown: the flag alone would say 0
+  first.record([obs("spark-a", 8888, "org/a", 100, 1000)], t0);
+  first.record([obs("spark-a", 8888, "org/a", 150, 2000, 0)], t0 + 60_000);
+  first.record([obs("spark-a", 8888, "org/a", 200, 3000, 400)], t0 + 120_000);
+  first.close();
+  for (const range of ["all", "today", "7d"]) {
+    const m = new LlmTokenLedger(file).snapshot(range, t0 + 180_000).series[0].models[0];
+    assert.deepEqual([m.cacheReported, m.unreportedPromptTokens], [true, 1000], range);
+  }
+  // A file from before the count: an unreported row's whole uncached prompt is unknown, a reported row's none.
+  const legacy = path.join(dir, "legacy.json");
+  const row = (cacheReported) => ({ promptTokens: 1000, completionTokens: 10, cachedTokens: 0, cacheReported, lastSeenAt: t0 });
+  fs.writeFileSync(legacy, JSON.stringify({ version: 1, series: {
+    "spark-a:8888": { updatedAt: t0, lastModelId: "org/a", counters: { output: 10, prompt: 1000, cached: null }, models: { "org/a": row(false) } },
+    "spark-b:8888": { updatedAt: t0, lastModelId: "org/b", counters: { output: 10, prompt: 1000, cached: 0 }, models: { "org/b": row(true) } },
+  } }));
+  const old = new LlmTokenLedger(legacy);
+  const byId = () => Object.fromEntries(old.snapshot("all", t0 + 120_000).series.map((x) => [x.sparkId, x.models[0].unreportedPromptTokens]));
+  assert.deepEqual(byId(), { "spark-a": 1000, "spark-b": 0 });
+  // new unmeasured traffic adds to what the old row already could not split
+  old.record([obs("spark-a", 8888, "org/a", 10, 1000)], t0 + 60_000);
+  old.record([obs("spark-a", 8888, "org/a", 20, 1300)], t0 + 120_000);
+  assert.deepEqual(byId(), { "spark-a": 1300, "spark-b": 0 });
+});
+
+test("LlmTokenLedger: a lifetime row written before the count takes it from its retained unreported days", () => {
+  // The engine reported its split on the 18th, then lost the counter: the lifetime row's flag says
+  // reported, but the 20th's 1000 prompt tokens were never measured.
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-tokens-"));
+  const file = path.join(dir, "llm-token-totals.json");
+  const t0 = Date.UTC(2026, 9, 20, 12, 0, 0);
+  const day = (promptTokens, cachedTokens, cacheReported) => ({ "org/a": { promptTokens, completionTokens: 10, cachedTokens, cacheReported } });
+  fs.writeFileSync(file, JSON.stringify({ version: 1, series: { "spark-a:8888": {
+    updatedAt: t0, lastModelId: "org/a", counters: { output: 30, prompt: 1500, cached: null },
+    models: { "org/a": { promptTokens: 1500, completionTokens: 20, cachedTokens: 400, cacheReported: true, lastSeenAt: t0 } },
+    daily: { "2026-10-18": day(500, 400, true), "2026-10-20": day(1000, 0, false) },
+  } } }));
+  const ledger = new LlmTokenLedger(file);
+  assert.equal(ledger.snapshot("all", t0).series[0].models[0].unreportedPromptTokens, 1000);
+  ledger.record([obs("spark-a", 8888, "org/a", 30, 1500)], t0); // seeds the baseline, credits nothing
+  ledger.record([obs("spark-a", 8888, "org/a", 40, 1700)], t0 + 60_000);
+  ledger.close();
+  assert.equal(new LlmTokenLedger(file).snapshot("all", t0 + 120_000).series[0].models[0].unreportedPromptTokens, 1200);
+});
+
+test("LlmTokenLedger: a cached backfill that the prompt absorbs also settles the unreported count", () => {
+  // 1000 unmeasured tokens, then the counter arrives and backfills 1500 cached (more than the prompt
+  // grew): that backfill explains the old prompt, so later measured misses must read as computed.
+  const ledger = tmpLedger();
+  const t0 = Date.UTC(2026, 9, 28, 12, 0, 0);
+  ledger.record([obs("spark-a", 8888, "m", 0, 0)], t0);
+  ledger.record([obs("spark-a", 8888, "m", 10, 1000)], t0 + 60_000);
+  ledger.record([obs("spark-a", 8888, "m", 20, 1000, 0)], t0 + 120_000);
+  ledger.record([obs("spark-a", 8888, "m", 30, 1000, 1500)], t0 + 180_000);
+  ledger.record([obs("spark-a", 8888, "m", 40, 2000, 1500)], t0 + 240_000);
+  for (const range of ["all", "today", "7d"]) {
+    const m = ledger.snapshot(range, t0 + 300_000).series[0].models[0];
+    assert.deepEqual([m.promptTokens, m.cachedTokens, m.unreportedPromptTokens], [2500, 1500, 0], range);
+  }
+});
+
+test("LlmTokenLedger: a reporting engine stays reported even when nothing hit", () => {
+  const ledger = tmpLedger();
+  const t0 = 1_730_000_000_000;
+  ledger.record([obs("spark-a", 8888, "org/a", 100, 1000, 0)], t0);
+  ledger.record([obs("spark-a", 8888, "org/a", 150, 2000, 0)], t0 + 60_000);
+  const s = ledger.snapshot().series[0];
+  assert.equal(s.models[0].cachedTokens, 0);
+  assert.equal(s.models[0].cacheReported, true); // a measured zero, i.e. real misses
+  assert.equal(s.totals.cacheReported, true);
+});
+
+test("LlmTokenLedger: the reported flag survives a restart", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-tokens-"));
+  const file = path.join(dir, "llm-token-totals.json");
+  const t0 = 1_730_000_000_000;
+  const first = new LlmTokenLedger(file);
+  first.record([obs("spark-a", 8888, "org/a", 100, 1000)], t0);
+  first.record([obs("spark-a", 8888, "org/a", 150, 2000)], t0 + 60_000);
+  first.close();
+  const second = new LlmTokenLedger(file);
+  assert.equal(second.snapshot().series[0].models[0].cacheReported, false);
+});
+
+test("LlmTokenLedger: legacy rows fall back to the endpoint's cached counter", () => {
+  // A file written before the flag existed carries no cacheReported anywhere.
+  const legacy = (counterCached, rowCached) => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "llm-tokens-"));
+    const file = path.join(dir, "llm-token-totals.json");
+    fs.writeFileSync(
+      file,
+      JSON.stringify({
+        version: 1,
+        series: {
+          "spark-a:8888": {
+            updatedAt: 1,
+            lastModelId: "org/a",
+            counters: { output: 100, prompt: 1000, cached: counterCached },
+            models: {
+              "org/a": { promptTokens: 1000, completionTokens: 100, cachedTokens: rowCached, lastSeenAt: 1 },
+            },
+          },
+        },
+      })
+    );
+    return new LlmTokenLedger(file).snapshot().series[0];
+  };
+  // Endpoint publishes the counter: a zero really is a cache miss.
+  assert.equal(legacy(0, 0).models[0].cacheReported, true);
+  // Endpoint never publishes it: the stored zero is not a measurement.
+  assert.equal(legacy(null, 0).models[0].cacheReported, false);
+  // Rows that did record cached tokens prove the backend reports the split.
+  assert.equal(legacy(null, 500).models[0].cacheReported, true);
 });
 
 test("LlmTokenLedger: daily buckets carry the cached split", () => {

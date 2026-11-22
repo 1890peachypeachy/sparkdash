@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { isolatedConfigEnv } from "../../__tests__/isolatedEnv.js";
 import { once } from "node:events";
 import fs from "node:fs";
 import { mkdtemp } from "node:fs/promises";
@@ -25,6 +26,7 @@ async function startServer(t) {
     cwd: path.resolve(import.meta.dirname, "../../.."),
     env: {
       ...process.env,
+      ...isolatedConfigEnv(tmp),
       HOME: tmp, // the launcher log directory lives under $HOME on the (local) Spark
       BIND_HOST: "127.0.0.1",
       PORT: String(port),
@@ -33,8 +35,10 @@ async function startServer(t) {
       SECRETS_KEY_PATH: path.join(tmp, ".secrets-key"),
       LLM_DAILY_JSON_PATH: path.join(tmp, "llm-daily.json"),
       FLEET_ENERGY_JSON_PATH: path.join(tmp, "fleet-energy.json"),
+      FLEET_ENERGY_MONTHLY_JSON_PATH: path.join(tmp, "fleet-energy-monthly.json"),
       EVENTS_JSON_PATH: path.join(tmp, "events.json"),
       GPU_HISTORY_JSON_PATH: path.join(tmp, "gpu-history.json"),
+      GPU_HISTORY_LONG_JSON_PATH: path.join(tmp, "gpu-history-long.json"),
       LLM_LAUNCHERS_JSON_PATH: path.join(tmp, "llm-launchers.json"),
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -132,4 +136,51 @@ test("register, start, stream, stop and remove an LLM through the HTTP API", asy
   assert.equal((await api(port, `${base}/${lid}`, { method: "DELETE" })).status, 200);
   assert.equal((await api(port, base)).body.launchers.length, 0);
   assert.equal((await api(port, `${base}/${lid}/start`, { method: "POST" })).status, 404);
+});
+
+test("model launchers are refused for a Windows unit", async (t) => {
+  const { port } = await startServer(t);
+  const created = await api(port, "/api/sparks", {
+    method: "POST",
+    body: JSON.stringify({ id: "desk", name: "desk", platform: "windows", lanIp: "192.0.2.10", ssh: { host: "192.0.2.10", user: "me", auth: "key" } }),
+  });
+  assert.equal(created.status, 200);
+  const res = await api(port, "/api/sparks/desk/llm-launchers");
+  assert.equal(res.status, 400);
+  assert.match(res.body.error, /not supported on Windows/);
+});
+
+test("the model order is saved through the HTTP API and survives a restart of the list", async (t) => {
+  const { port, tmp } = await startServer(t);
+  const created = await api(port, "/api/sparks", {
+    method: "POST",
+    body: JSON.stringify({ id: "alpha", name: "alpha", lanIp: "127.0.0.1", isLocal: true, ssh: { host: "127.0.0.1", user: os.userInfo().username, auth: "key" } }),
+  });
+  assert.equal(created.status, 200);
+
+  const base = "/api/sparks/alpha/llm-launchers";
+  const ids = [];
+  for (const name of ["One", "Two", "Three"]) {
+    const added = await api(port, base, { method: "POST", body: JSON.stringify({ name, dir: path.join(tmp, name) }) });
+    assert.equal(added.status, 201);
+    ids.push(added.body.launcher.id);
+  }
+  const [one, two, three] = ids;
+  const listed = async () => (await api(port, base)).body.launchers.map((l) => l.id);
+
+  const moved = await api(port, `${base}/order`, { method: "PUT", body: JSON.stringify({ order: [three, one, two] }) });
+  assert.equal(moved.status, 200, "'order' is not taken for a launcher id");
+  assert.deepEqual(moved.body.launchers.map((l) => l.id), [three, one, two]);
+  assert.deepEqual(await listed(), [three, one, two]);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(tmp, "llm-launchers.json"), "utf8")).launchers.alpha.map((l) => l.id), [three, one, two]);
+
+  // A partial list moves the named models up and keeps the rest.
+  assert.deepEqual((await api(port, `${base}/order`, { method: "PUT", body: JSON.stringify({ order: [two] }) })).body.launchers.map((l) => l.id), [two, three, one]);
+
+  for (const bad of [{}, { order: "x" }, { order: [1, 2] }, { order: [two, null] }]) {
+    const res = await api(port, `${base}/order`, { method: "PUT", body: JSON.stringify(bad) });
+    assert.equal(res.status, 400, JSON.stringify(bad));
+  }
+  assert.deepEqual(await listed(), [two, three, one], "a rejected request leaves the order alone");
+  assert.equal((await api(port, "/api/sparks/nope/llm-launchers/order", { method: "PUT", body: JSON.stringify({ order: [] }) })).status, 404);
 });
