@@ -1069,6 +1069,7 @@ export class LlmProbe {
     let servedModelId = null;
     let decodeLanes = null;
     this.models = [];
+    this._modelAliasesShareLimit = false;
     try {
       const modelsRes = await this._fetch(`${this.baseUrl}/v1/models`);
       const auth = this._noteAuthStatus(modelsRes.status);
@@ -1083,6 +1084,18 @@ export class LlmProbe {
           typeof model?.id === "string" && model.id.trim().length > 0
         );
         this.models = [...new Set(validModels.map((model) => model.id))];
+        // Several ids with one weights root and one limit are aliases of a single loaded engine (gr8 lists
+        // GLM-5.3-Flash-EXL3 / glm-5.3 / glm53), so they share that limit; genuine multi-model routers differ.
+        this._modelAliasesShareLimit =
+          validModels.length > 1 &&
+          validModels.every(
+            (m) =>
+              typeof m?.root === "string" &&
+              m.root.length > 0 &&
+              m.root === validModels[0].root &&
+              Number.isFinite(m?.max_model_len) &&
+              m.max_model_len === validModels[0].max_model_len
+          );
         const model = validModels[0];
         servedModelId = this.models.length > 1
           ? model.id
@@ -4254,7 +4267,8 @@ export class LlmProbe {
       models: metricsLive ? [...this.models] : [],
       // Strata advertises aliases for one loaded engine, sharing its native
       // context limit. Genuine multi-model routers still have no shared limit.
-      contextLength: this.models.length > 1 && this.backendType !== "strata" ? null : this.contextLength,
+      contextLength:
+        this.models.length > 1 && this.backendType !== "strata" && !this._modelAliasesShareLimit ? null : this.contextLength,
       gpuMemoryUtilization: this.gpuMemoryUtilization,
       slotsActive: this.slotsActive,
       slotsTotal: this.slotsTotal,
